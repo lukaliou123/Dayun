@@ -38,6 +38,8 @@
     const TRUCK_SPEED_RATIO = 0.75;
     const TRUCK_CATCHUP_ACCEL = 0.003;
     const TRUCK_GAME_OVER_DIST = 3;
+    const MIRROR_ZOOM_START_DIST = 320;
+    const MIRROR_ZOOM_END_DIST = 18;
 
     const COLORS = {
         SKY: '#72D7EE',
@@ -556,9 +558,15 @@
     let truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO;
     let truckX = 0;
     let gameTime = 0;
+    let truckDelay = 1.0;  // Truck waits this many seconds before starting
 
     function updateTruck(dt) {
         gameTime += dt;
+
+        if (truckDelay > 0) {
+            truckDelay -= dt;
+            return;
+        }
 
         truckMaxSpeed = MAX_SPEED * (TRUCK_SPEED_RATIO + gameTime * TRUCK_CATCHUP_ACCEL);
         truckMaxSpeed = Math.min(truckMaxSpeed, MAX_SPEED * 0.98);
@@ -716,10 +724,13 @@
     }
 
     function drawRearMirror() {
-        if (truckPosition < 0) return;
-
         const truckDist = Math.max(0.1, (position - truckPosition) / SEGMENT_LENGTH);
-        const distFactor = clamp(1 - (truckDist / 45), 0, 1);
+        // Start zooming from farther away, then ramp up hard at close range.
+        const zoomT = clamp(
+            (MIRROR_ZOOM_START_DIST - truckDist) / (MIRROR_ZOOM_START_DIST - MIRROR_ZOOM_END_DIST),
+            0, 1
+        );
+        const distFactor = Math.pow(zoomT, 0.75);
 
         const mirrorW = 260;
         const mirrorH = 92;
@@ -764,8 +775,33 @@
         const jitter = distFactor > 0.6 ? (Math.random() - 0.5) * 3 : 0;
         const tx = mirrorX + mirrorW / 2 + jitter;
         const ty = mirrorY + mirrorH - 8;
-        const tw = 72 + 120 * distFactor;
-        const th = 40 + 52 * distFactor;
+        const tw = 40 + 210 * distFactor;
+        const th = 24 + 106 * distFactor;
+
+        // If truck is very far (or still behind start line), show a distant light pair
+        // so the mirror always gives feedback when enabled.
+        if (truckDist > MIRROR_ZOOM_START_DIST) {
+            const farT = clamp((truckDist - MIRROR_ZOOM_START_DIST) / 220, 0, 1);
+            const farY = mirrorY + 20 + farT * 16;
+            const farGap = 10 + farT * 6;
+            const farR = 1.8 + (1 - farT) * 2.2;
+            ctx.fillStyle = 'rgba(255,245,120,0.85)';
+            ctx.beginPath();
+            ctx.arc(tx - farGap / 2, farY, farR, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(tx + farGap / 2, farY, farR, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = 'rgba(255,255,255,0.55)';
+            ctx.font = '10px monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText('远处追击中', tx, farY + 7);
+
+            ctx.restore();
+            return;
+        }
 
         // Headlight glare
         if (distFactor > 0.2) {
@@ -894,11 +930,23 @@
         ctx.fillStyle = '#FF2222';
         ctx.fillRect(iconX - 3, barY - 2, 6, barH + 4);
 
-        // Truck icon on progress bar
+        // Truck icon on progress bar (same coordinate system as player).
+        // This keeps both markers as true on-track progress values.
         const truckPct = clamp(truckPosition / trackLength, 0, 1);
         const truckIconX = barX + barW * truckPct;
         ctx.fillStyle = '#1155CC';
         ctx.fillRect(truckIconX - 4, barY - 2, 8, barH + 4);
+
+        // If the truck is still behind the start line, show an off-scale indicator.
+        if (truckPosition < 0) {
+            ctx.fillStyle = '#1155CC';
+            ctx.beginPath();
+            ctx.moveTo(barX - 12, barY + barH / 2);
+            ctx.lineTo(barX - 4, barY - 1);
+            ctx.lineTo(barX - 4, barY + barH + 1);
+            ctx.closePath();
+            ctx.fill();
+        }
 
         // Distance labels
         ctx.fillStyle = '#FFF';
@@ -1140,6 +1188,7 @@
         truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO;
         truckX = 0;
         gameTime = 0;
+        truckDelay = 1.0;
         crashTimer = 0;
         crashIntensity = 0;
         stuckOnObstacle = false;
