@@ -1,0 +1,1273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>逃离大运 - Escape from DAYUN</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <script>
+    // ===== SECTION 1: CONSTANTS & CONFIGURATION =====
+    const CANVAS_WIDTH = 640;
+    const CANVAS_HEIGHT = 480;
+
+    const SEGMENT_LENGTH = 200;
+    const ROAD_WIDTH = 2000;
+    const RUMBLE_LENGTH = 3;
+    const LANES = 3;
+    const DRAW_DISTANCE = 200;
+    const FIELD_OF_VIEW = 100;
+    const CAMERA_HEIGHT = 1000;
+    const CAMERA_DEPTH = 1 / Math.tan((FIELD_OF_VIEW / 2) * Math.PI / 180);
+
+    const MAX_SPEED = SEGMENT_LENGTH * 60;
+    const ACCEL = MAX_SPEED / 5;
+    const BRAKE_DECEL = -MAX_SPEED;
+    const NATURAL_DECEL = -MAX_SPEED / 5;
+    const OFF_ROAD_DECEL = -MAX_SPEED / 2;
+    const OFF_ROAD_LIMIT = MAX_SPEED / 4;
+    const CENTRIFUGAL_FORCE = 0.3;
+
+    const TRUCK_INITIAL_DISTANCE = 300;
+    const TRUCK_SPEED_RATIO = 0.75;
+    const TRUCK_CATCHUP_ACCEL = 0.003;
+    const TRUCK_GAME_OVER_DIST = 3;
+
+    const COLORS = {
+        SKY: '#72D7EE',
+        TREE: '#005108',
+        LIGHT: { road: '#6B6B6B', rumble: '#555555', grass: '#10AA10', lane: '#CCCCCC' },
+        DARK:  { road: '#696969', rumble: '#BBBBBB', grass: '#009A00', lane: '#696969' },
+        FINISH: { road: '#333333', rumble: '#FF0000', grass: '#10AA10', lane: '#FFFFFF' }
+    };
+
+    const CURVE = { NONE: 0, EASY: 2, MEDIUM: 4, HARD: 6, SHARP: 10 };
+
+    const STATE = { MENU: 'menu', COUNTDOWN: 'countdown', PLAYING: 'playing', GAMEOVER: 'gameover', WIN: 'win' };
+    const VIEW = { PLAYER: 'player', MIRROR: 'mirror' };
+
+    // ===== SECTION 2: UTILITY FUNCTIONS =====
+    function clamp(value, min, max) { return Math.max(min, Math.min(value, max)); }
+    function interpolate(a, b, percent) { return a + (b - a) * percent; }
+    function percentRemaining(n, total) { return (n % total) / total; }
+
+    function overlap(x1, w1, x2, w2) {
+        const half1 = w1 / 2, half2 = w2 / 2;
+        return !((x1 + half1) < (x2 - half2) || (x1 - half1) > (x2 + half2));
+    }
+
+    function project(p, cameraX, cameraY, cameraZ, cameraDepth, width, height, roadWidth) {
+        p.camera.x = (p.world.x || 0) - cameraX;
+        p.camera.y = (p.world.y || 0) - cameraY;
+        p.camera.z = (p.world.z || 0) - cameraZ;
+        if (p.camera.z <= 0) p.camera.z = 0.1;
+        p.screen.scale = cameraDepth / p.camera.z;
+        p.screen.x = Math.round((width / 2) + (p.screen.scale * p.camera.x * width / 2));
+        p.screen.y = Math.round((height / 2) - (p.screen.scale * p.camera.y * height / 2));
+        p.screen.w = Math.round((p.screen.scale * roadWidth * width / 2));
+    }
+
+    // ===== SECTION 3: ROAD/TRACK BUILDER =====
+    let segments = [];
+    let trackLength = 0;
+
+    function makePoint(z) {
+        return { world: { x: 0, y: 0, z: z }, camera: { x: 0, y: 0, z: 0 }, screen: { x: 0, y: 0, w: 0, scale: 0 } };
+    }
+
+    function addSegment(curve) {
+        const n = segments.length;
+        segments.push({
+            index: n,
+            p1: makePoint(n * SEGMENT_LENGTH),
+            p2: makePoint((n + 1) * SEGMENT_LENGTH),
+            curve: curve,
+            color: Math.floor(n / RUMBLE_LENGTH) % 2 ? COLORS.DARK : COLORS.LIGHT,
+            sprites: [],
+            isFinish: false,
+            clip: 0
+        });
+    }
+
+    function addStraight(num) {
+        for (let i = 0; i < num; i++) addSegment(CURVE.NONE);
+    }
+
+    function addCurve(num, curve, easeIn, easeOut) {
+        easeIn = easeIn || 0;
+        easeOut = easeOut || 0;
+        const mid = num - easeIn - easeOut;
+        for (let i = 0; i < easeIn; i++) addSegment(interpolate(0, curve, i / easeIn));
+        for (let i = 0; i < mid; i++) addSegment(curve);
+        for (let i = 0; i < easeOut; i++) addSegment(interpolate(curve, 0, i / easeOut));
+    }
+
+    function addSharpTurn(dir) {
+        addCurve(40, CURVE.SHARP * dir, 8, 8);
+    }
+
+    function buildTrack() {
+        segments = [];
+
+        // Section A: Starting straight
+        addStraight(50);
+
+        // Section B: Gentle right curve
+        addCurve(80, CURVE.MEDIUM, 15, 15);
+
+        // Section C: Straight
+        addStraight(60);
+
+        // Section D: Sharp left 90-degree turn
+        addSharpTurn(-1);
+
+        // Section E: Straight with obstacles
+        const obsStart = segments.length;
+        addStraight(80);
+        // Place obstacles
+        const offsets = [
+            [15, -0.5, 0.18],
+            [30, 0.35, 0.18],
+            [45, 0.0, 0.18],
+            [55, -0.4, 0.15],
+            [55, 0.5, 0.15],
+            [70, 0.2, 0.2]
+        ];
+        offsets.forEach(([idx, off, w]) => {
+            if (segments[obsStart + idx]) {
+                segments[obsStart + idx].sprites.push({ source: 'obstacle', offset: off, width: w });
+            }
+        });
+
+        // Section F: Sharp right 90-degree turn
+        addSharpTurn(1);
+
+        // Section G: Narrow passage
+        const narrowStart = segments.length;
+        addStraight(40);
+        for (let i = narrowStart; i < segments.length; i++) {
+            segments[i].sprites.push({ source: 'barrier', offset: -0.75, width: 0.35 });
+            segments[i].sprites.push({ source: 'barrier', offset: 0.75, width: 0.35 });
+        }
+
+        // Section H: Gentle left curve
+        addCurve(60, -CURVE.EASY, 10, 10);
+
+        // Section I: Final straight to finish
+        addStraight(80);
+
+        // Mark finish
+        for (let i = segments.length - 12; i < segments.length - 2; i++) {
+            if (segments[i]) {
+                segments[i].color = COLORS.FINISH;
+                segments[i].isFinish = true;
+            }
+        }
+
+        // Add roadside trees
+        for (let i = 0; i < segments.length; i++) {
+            if (i % 10 === 0) segments[i].sprites.push({ source: 'tree', offset: -1.6 });
+            if (i % 13 === 0) segments[i].sprites.push({ source: 'tree', offset: 1.8 });
+            if (i % 17 === 0) segments[i].sprites.push({ source: 'tree', offset: -2.0 });
+            if (i % 21 === 0) segments[i].sprites.push({ source: 'tree', offset: 2.2 });
+        }
+
+        trackLength = segments.length * SEGMENT_LENGTH;
+    }
+
+    function findSegment(z) {
+        const idx = Math.floor(z / SEGMENT_LENGTH) % segments.length;
+        return segments[idx < 0 ? 0 : idx];
+    }
+
+    // ===== SECTION 4: RENDERING ENGINE =====
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    function drawPoly(x1, y1, w1, x2, y2, w2, color) {
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(x1 - w1, y1);
+        ctx.lineTo(x1 + w1, y1);
+        ctx.lineTo(x2 + w2, y2);
+        ctx.lineTo(x2 - w2, y2);
+        ctx.closePath();
+        ctx.fill();
+    }
+
+    function renderBackground(curvature) {
+        // Sky
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, CANVAS_HEIGHT / 2);
+        skyGrad.addColorStop(0, '#1a1a2e');
+        skyGrad.addColorStop(1, COLORS.SKY);
+        ctx.fillStyle = skyGrad;
+        ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        // Mountains (shift with curve for parallax)
+        const shift = curvature * -50;
+        ctx.fillStyle = '#2a5a3a';
+        ctx.beginPath();
+        ctx.moveTo(-100 + shift, CANVAS_HEIGHT / 2);
+        const peaks = [
+            [60, -35], [140, -15], [220, -50], [320, -25],
+            [420, -55], [520, -20], [600, -40], [700, -10]
+        ];
+        peaks.forEach(([px, py]) => ctx.lineTo(px + shift, CANVAS_HEIGHT / 2 + py));
+        ctx.lineTo(CANVAS_WIDTH + 100 + shift, CANVAS_HEIGHT / 2);
+        ctx.closePath();
+        ctx.fill();
+
+        // Darker mountains behind
+        ctx.fillStyle = '#1a3a2a';
+        ctx.beginPath();
+        ctx.moveTo(-100 + shift * 0.5, CANVAS_HEIGHT / 2);
+        const peaks2 = [
+            [100, -55], [200, -30], [300, -65], [400, -40],
+            [500, -70], [600, -35], [700, -50]
+        ];
+        peaks2.forEach(([px, py]) => ctx.lineTo(px + shift * 0.5, CANVAS_HEIGHT / 2 + py));
+        ctx.lineTo(CANVAS_WIDTH + 100 + shift * 0.5, CANVAS_HEIGHT / 2);
+        ctx.closePath();
+        ctx.fill();
+    }
+
+    function renderRoad(cameraPosition = position, cameraX = playerX) {
+        const baseSegIdx = Math.floor(cameraPosition / SEGMENT_LENGTH);
+        let maxy = CANVAS_HEIGHT;
+        let x = 0;
+        let dx = 0;
+        let curveAccum = 0;
+
+        // Reset clip for visible segments, then project and render
+        for (let n = 0; n < DRAW_DISTANCE; n++) {
+            const segIdx = (baseSegIdx + n) % segments.length;
+            if (segIdx < 0 || segIdx >= segments.length) continue;
+            segments[segIdx].clip = CANVAS_HEIGHT;
+        }
+
+        for (let n = 0; n < DRAW_DISTANCE; n++) {
+            const segIdx = (baseSegIdx + n) % segments.length;
+            if (segIdx < 0 || segIdx >= segments.length) continue;
+            const seg = segments[segIdx];
+
+            const looped = segIdx < baseSegIdx;
+            const segZ = seg.p1.world.z + (looped ? trackLength : 0);
+
+            project(seg.p1, cameraX * ROAD_WIDTH - x, CAMERA_HEIGHT, cameraPosition, CAMERA_DEPTH,
+                    CANVAS_WIDTH, CANVAS_HEIGHT, ROAD_WIDTH);
+            project(seg.p2, cameraX * ROAD_WIDTH - x - dx, CAMERA_HEIGHT, cameraPosition, CAMERA_DEPTH,
+                    CANVAS_WIDTH, CANVAS_HEIGHT, ROAD_WIDTH);
+
+            x += dx;
+            dx += seg.curve;
+
+            if (n === 0) curveAccum = seg.curve;
+
+            // Skip if behind or below clip
+            if (seg.p1.camera.z <= CAMERA_DEPTH) continue;
+            if (seg.p2.screen.y >= maxy) continue;
+            if (seg.p2.screen.y >= seg.p1.screen.y) continue;
+
+            const color = seg.color;
+            const x1 = seg.p1.screen.x, y1 = seg.p1.screen.y, w1 = seg.p1.screen.w;
+            const x2 = seg.p2.screen.x, y2 = seg.p2.screen.y, w2 = seg.p2.screen.w;
+
+            // Grass
+            ctx.fillStyle = color.grass;
+            ctx.fillRect(0, y2, CANVAS_WIDTH, y1 - y2);
+
+            // Road
+            drawPoly(x1, y1, w1, x2, y2, w2, color.road);
+
+            // Rumble strips
+            const rw1 = w1 * 0.15, rw2 = w2 * 0.15;
+            drawPoly(x1 - w1, y1, rw1, x2 - w2, y2, rw2, color.rumble);
+            drawPoly(x1 + w1, y1, rw1, x2 + w2, y2, rw2, color.rumble);
+
+            // Lane markings
+            if (color.lane && color.lane !== color.road) {
+                const lw1 = w1 / 20, lw2 = w2 / 20;
+                for (let lane = 1; lane < LANES; lane++) {
+                    const laneX1 = x1 - w1 + (2 * w1 * lane / LANES);
+                    const laneX2 = x2 - w2 + (2 * w2 * lane / LANES);
+                    drawPoly(laneX1, y1, lw1, laneX2, y2, lw2, color.lane);
+                }
+            }
+
+            seg.clip = maxy;
+            maxy = y2;
+        }
+
+        // Draw sprites back-to-front
+        for (let n = DRAW_DISTANCE - 1; n >= 1; n--) {
+            const segIdx = (baseSegIdx + n) % segments.length;
+            if (segIdx < 0 || segIdx >= segments.length) continue;
+            const seg = segments[segIdx];
+
+            if (!seg.p1.screen.scale || seg.p1.screen.scale <= 0) continue;
+
+            for (let i = 0; i < seg.sprites.length; i++) {
+                const sprite = seg.sprites[i];
+                const scale = seg.p1.screen.scale;
+                const spriteX = seg.p1.screen.x + (scale * sprite.offset * ROAD_WIDTH * CANVAS_WIDTH / 2);
+                const spriteY = seg.p1.screen.y;
+
+                // Allow sprites that sit exactly on the clip boundary.
+                // Using >= here can hide most road sprites because many segment joins share the same Y.
+                if (spriteY <= 0 || spriteY > seg.clip) continue;
+
+                switch (sprite.source) {
+                    case 'obstacle': drawObstacle(spriteX, spriteY, scale); break;
+                    case 'barrier': drawBarrier(spriteX, spriteY, scale); break;
+                    case 'tree': drawTree(spriteX, spriteY, scale); break;
+                }
+            }
+        }
+
+        return curveAccum;
+    }
+
+    function drawObstacle(x, y, scale) {
+        const w = Math.max(3, 120 * scale * CANVAS_WIDTH);
+        const h = Math.max(3, 130 * scale * CANVAS_HEIGHT);
+        if (w < 4 || h < 4) return;
+
+        ctx.save();
+
+        // Ground shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.beginPath();
+        ctx.ellipse(x, y, w * 0.6, h * 0.12, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Main wooden body
+        ctx.fillStyle = '#B8860B';
+        ctx.fillRect(x - w / 2, y - h, w, h);
+
+        // Wood plank lines (horizontal)
+        ctx.fillStyle = '#9A6F0A';
+        const plankCount = 5;
+        for (let p = 0; p < plankCount; p++) {
+            const py = y - h + h * (p / plankCount);
+            ctx.fillRect(x - w / 2, py, w, Math.max(1, h * 0.02));
+        }
+
+        // Dark frame border
+        ctx.strokeStyle = '#5C3D00';
+        ctx.lineWidth = Math.max(2, w * 0.05);
+        ctx.strokeRect(x - w / 2, y - h, w, h);
+
+        // Cross bracing
+        ctx.strokeStyle = '#6B4015';
+        ctx.lineWidth = Math.max(2, w * 0.04);
+        ctx.beginPath();
+        ctx.moveTo(x - w / 2 + 2, y - h + 2);
+        ctx.lineTo(x + w / 2 - 2, y - 2);
+        ctx.moveTo(x + w / 2 - 2, y - h + 2);
+        ctx.lineTo(x - w / 2 + 2, y - 2);
+        ctx.stroke();
+
+        // Metal corner plates
+        ctx.fillStyle = '#666';
+        const cs = Math.max(3, w * 0.1);
+        ctx.fillRect(x - w / 2, y - h, cs, cs);
+        ctx.fillRect(x + w / 2 - cs, y - h, cs, cs);
+        ctx.fillRect(x - w / 2, y - cs, cs, cs);
+        ctx.fillRect(x + w / 2 - cs, y - cs, cs, cs);
+
+        // Center warning sign
+        if (w > 12) {
+            // Red diamond warning
+            const dSize = Math.min(w * 0.35, h * 0.3);
+            ctx.fillStyle = '#FF0000';
+            ctx.beginPath();
+            ctx.moveTo(x, y - h / 2 - dSize / 2);
+            ctx.lineTo(x + dSize / 2, y - h / 2);
+            ctx.lineTo(x, y - h / 2 + dSize / 2);
+            ctx.lineTo(x - dSize / 2, y - h / 2);
+            ctx.closePath();
+            ctx.fill();
+
+            // "!" in the diamond
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${Math.max(8, Math.floor(dSize * 0.6))}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('!', x, y - h / 2);
+        }
+
+        ctx.restore();
+    }
+
+    function drawBarrier(x, y, scale) {
+        const w = Math.max(2, 60 * scale * CANVAS_WIDTH);
+        const h = Math.max(2, 40 * scale * CANVAS_HEIGHT);
+        ctx.fillStyle = '#888888';
+        ctx.fillRect(x - w / 2, y - h, w, h);
+        ctx.fillStyle = '#FF0000';
+        ctx.fillRect(x - w / 2, y - h, w, h * 0.12);
+        ctx.fillStyle = '#AAAAAA';
+        ctx.fillRect(x - w / 2, y - h * 0.5, w, h * 0.08);
+    }
+
+    function drawTree(x, y, scale) {
+        const tw = Math.max(1, 10 * scale * CANVAS_WIDTH);
+        const th = Math.max(1, 60 * scale * CANVAS_HEIGHT);
+        const cr = Math.max(1, 30 * scale * CANVAS_WIDTH);
+        // Trunk
+        ctx.fillStyle = '#4A2F00';
+        ctx.fillRect(x - tw / 2, y - th, tw, th);
+        // Crown
+        ctx.fillStyle = COLORS.TREE;
+        ctx.beginPath();
+        ctx.arc(x, y - th - cr * 0.3, cr, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // ===== SECTION 5: PLAYER CAR =====
+    let playerX = 0;
+    let speed = 0;
+    let position = 0;
+    let cameraMode = VIEW.PLAYER;
+
+    const keys = { left: false, right: false, up: false, down: false };
+
+    document.addEventListener('keydown', (e) => {
+        switch (e.key) {
+            case 'ArrowLeft':  case 'a': case 'A': keys.left = true; e.preventDefault(); break;
+            case 'ArrowRight': case 'd': case 'D': keys.right = true; e.preventDefault(); break;
+            case 'ArrowUp':    case 'w': case 'W': keys.up = true; e.preventDefault(); break;
+            case 'ArrowDown':  case 's': case 'S': keys.down = true; e.preventDefault(); break;
+            case 'c': case 'C':
+                cameraMode = (cameraMode === VIEW.PLAYER) ? VIEW.MIRROR : VIEW.PLAYER;
+                e.preventDefault();
+                break;
+        }
+    });
+
+    document.addEventListener('keyup', (e) => {
+        switch (e.key) {
+            case 'ArrowLeft':  case 'a': case 'A': keys.left = false; break;
+            case 'ArrowRight': case 'd': case 'D': keys.right = false; break;
+            case 'ArrowUp':    case 'w': case 'W': keys.up = false; break;
+            case 'ArrowDown':  case 's': case 'S': keys.down = false; break;
+        }
+    });
+
+    function updatePlayer(dt) {
+        const playerSeg = findSegment(position);
+        const speedPercent = speed / MAX_SPEED;
+
+        // Acceleration (blocked when stuck on obstacle)
+        if (stuckOnObstacle) {
+            speed = 0;
+        } else if (keys.up) {
+            speed += ACCEL * dt;
+        } else if (keys.down) {
+            speed += BRAKE_DECEL * dt;
+        } else {
+            speed += NATURAL_DECEL * dt;
+        }
+
+        // Steering — allow even when stuck (so player can steer around obstacle)
+        const steerSpeed = 3.0;
+        const steerAmount = stuckOnObstacle ? 1.5 * dt : steerSpeed * dt * Math.max(speedPercent, 0.1);
+        if (keys.left) playerX -= steerAmount;
+        if (keys.right) playerX += steerAmount;
+
+        // Centrifugal force
+        playerX -= (playerSeg.curve * CENTRIFUGAL_FORCE * speedPercent * speedPercent * dt);
+
+        // Off-road: slow down, death handled by collision system at 1.8
+        if (playerX < -1 || playerX > 1) {
+            if (speed > OFF_ROAD_LIMIT) speed += OFF_ROAD_DECEL * dt;
+        }
+
+        speed = clamp(speed, 0, MAX_SPEED);
+        position += speed * dt;
+        if (position >= trackLength) position = trackLength;
+    }
+
+    function drawPlayerCar() {
+        const cx = CANVAS_WIDTH / 2;
+        const cy = CANVAS_HEIGHT - 40;
+        const carW = 38;
+        const carH = 22;
+
+        // Determine tilt
+        let tiltX = 0;
+        if (keys.left && speed > 0) tiltX = -2;
+        if (keys.right && speed > 0) tiltX = 2;
+
+        ctx.save();
+        ctx.translate(cx + tiltX, cy);
+
+        // Shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(-carW / 2 + 4, 4, carW, carH);
+
+        // Main body
+        ctx.fillStyle = '#FF2222';
+        ctx.fillRect(-carW / 2, -carH, carW, carH);
+
+        // Roof
+        ctx.fillStyle = '#CC0000';
+        ctx.fillRect(-carW / 3, -carH + 4, carW * 2 / 3, carH - 8);
+
+        // Windshield
+        ctx.fillStyle = '#88CCFF';
+        ctx.fillRect(-carW / 4, -carH + 2, carW / 2, 5);
+
+        // Rear window
+        ctx.fillStyle = '#6699CC';
+        ctx.fillRect(-carW / 5, -5, carW * 2 / 5, 4);
+
+        // Wheels
+        ctx.fillStyle = '#111';
+        ctx.fillRect(-carW / 2 - 4, -carH + 2, 5, 7);
+        ctx.fillRect(carW / 2 - 1, -carH + 2, 5, 7);
+        ctx.fillRect(-carW / 2 - 4, -8, 5, 7);
+        ctx.fillRect(carW / 2 - 1, -8, 5, 7);
+
+        // Brake lights
+        if (keys.down && speed > 0) {
+            ctx.fillStyle = '#FF0000';
+            ctx.fillRect(-carW / 2, -2, 6, 3);
+            ctx.fillRect(carW / 2 - 6, -2, 6, 3);
+        }
+
+        // Headlights (always on)
+        ctx.fillStyle = '#FFFFAA';
+        ctx.fillRect(-carW / 2 + 2, -carH - 1, 5, 2);
+        ctx.fillRect(carW / 2 - 7, -carH - 1, 5, 2);
+
+        ctx.restore();
+    }
+
+    // ===== SECTION 6: DAYUN TRUCK AI =====
+    let truckPosition = 0;
+    let truckSpeed = 0;
+    let truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO;
+    let truckX = 0;
+    let gameTime = 0;
+
+    function updateTruck(dt) {
+        gameTime += dt;
+
+        truckMaxSpeed = MAX_SPEED * (TRUCK_SPEED_RATIO + gameTime * TRUCK_CATCHUP_ACCEL);
+        truckMaxSpeed = Math.min(truckMaxSpeed, MAX_SPEED * 0.98);
+
+        // Truck accelerates gradually, not instantly
+        const truckAccel = MAX_SPEED / 8;
+        if (truckSpeed < truckMaxSpeed) {
+            truckSpeed += truckAccel * dt;
+            if (truckSpeed > truckMaxSpeed) truckSpeed = truckMaxSpeed;
+        }
+        truckPosition += truckSpeed * dt;
+        // Don't clamp to 0 — truck starts behind the start line (negative position)
+        if (truckPosition > trackLength) truckPosition = trackLength;
+
+        // Follow road center (only when truck is on the track)
+        if (truckPosition >= 0) {
+            const truckSeg = findSegment(truckPosition);
+            truckX = interpolate(truckX, 0, 0.1);
+            truckX -= truckSeg.curve * 0.008;
+            truckX = clamp(truckX, -0.6, 0.6);
+        }
+
+        // Check catch — only when truck has actually reached the player
+        const dist = position - truckPosition;
+        if (dist >= 0 && dist < TRUCK_GAME_OVER_DIST * SEGMENT_LENGTH) {
+            gameOverReason = 'caught';
+            gameState = STATE.GAMEOVER;
+        }
+        if (truckPosition > position && position > SEGMENT_LENGTH * 10) {
+            gameOverReason = 'caught';
+            gameState = STATE.GAMEOVER;
+        }
+    }
+
+    function drawTruck(cameraPosition = position) {
+        // Don't draw if truck is still behind the start line
+        if (truckPosition < 0) return;
+
+        const truckSegIdx = Math.floor(truckPosition / SEGMENT_LENGTH);
+        const cameraSegIdx = Math.floor(cameraPosition / SEGMENT_LENGTH);
+        const behind = cameraSegIdx - truckSegIdx;
+
+        if (behind < 0 || behind > DRAW_DISTANCE) return;
+
+        if (truckSegIdx < 0 || truckSegIdx >= segments.length) return;
+        const seg = segments[truckSegIdx];
+        if (!seg || !seg.p1.screen.scale || seg.p1.screen.scale <= 0) return;
+
+        const scale = seg.p1.screen.scale;
+        const screenX = seg.p1.screen.x + (scale * truckX * ROAD_WIDTH * CANVAS_WIDTH / 2);
+        const screenY = seg.p1.screen.y;
+
+        const tw = 140 * scale * CANVAS_WIDTH;
+        const th = 90 * scale * CANVAS_HEIGHT;
+
+        if (tw < 3 || th < 3) return;
+        if (screenY <= 0 || screenY > CANVAS_HEIGHT) return;
+
+        ctx.save();
+        ctx.translate(screenX, screenY);
+
+        // Truck body (blue)
+        ctx.fillStyle = '#1155CC';
+        ctx.fillRect(-tw / 2, -th, tw, th);
+
+        // Cab
+        ctx.fillStyle = '#0D3D8A';
+        ctx.fillRect(-tw / 2, -th, tw * 0.3, th * 0.75);
+
+        // Windshield
+        ctx.fillStyle = '#AADDFF';
+        ctx.fillRect(-tw / 2 + tw * 0.03, -th + th * 0.08, tw * 0.24, th * 0.3);
+
+        // Cargo
+        ctx.fillStyle = '#0E4499';
+        ctx.fillRect(-tw / 2 + tw * 0.32, -th + th * 0.05, tw * 0.66, th * 0.85);
+
+        // "大运" text
+        if (tw > 40) {
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${Math.max(8, Math.floor(th * 0.22))}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('大运', tw * 0.15, -th * 0.45);
+        }
+
+        // Headlights (menacing yellow)
+        ctx.fillStyle = '#FFFF00';
+        ctx.shadowColor = '#FFFF00';
+        ctx.shadowBlur = tw > 20 ? 10 : 0;
+        ctx.fillRect(-tw / 2 + 2, -th * 0.12, tw * 0.08, th * 0.08);
+        ctx.fillRect(-tw / 2 + tw * 0.22, -th * 0.12, tw * 0.08, th * 0.08);
+        ctx.shadowBlur = 0;
+
+        // Wheels
+        ctx.fillStyle = '#111';
+        const wheelW = tw * 0.08;
+        const wheelH = th * 0.12;
+        ctx.fillRect(-tw / 2, -wheelH, wheelW, wheelH);
+        ctx.fillRect(tw / 2 - wheelW, -wheelH, wheelW, wheelH);
+        ctx.fillRect(tw * 0.05, -wheelH, wheelW, wheelH);
+
+        // Bumper
+        ctx.fillStyle = '#333';
+        ctx.fillRect(-tw / 2, -th * 0.05, tw, th * 0.05);
+
+        ctx.restore();
+    }
+
+    function drawPlayerFromTruckView(cameraPosition) {
+        const playerSegIdx = Math.floor(position / SEGMENT_LENGTH);
+        const cameraSegIdx = Math.floor(cameraPosition / SEGMENT_LENGTH);
+        const ahead = playerSegIdx - cameraSegIdx;
+        if (ahead <= 0 || ahead > DRAW_DISTANCE) return;
+
+        if (playerSegIdx < 0 || playerSegIdx >= segments.length) return;
+        const seg = segments[playerSegIdx];
+        if (!seg || !seg.p1.screen.scale || seg.p1.screen.scale <= 0) return;
+
+        const scale = seg.p1.screen.scale;
+        const screenX = seg.p1.screen.x + (scale * playerX * ROAD_WIDTH * CANVAS_WIDTH / 2);
+        const screenY = seg.p1.screen.y;
+
+        const carW = Math.max(3, 140 * scale * CANVAS_WIDTH);
+        const carH = Math.max(3, 80 * scale * CANVAS_HEIGHT);
+        if (carW < 3 || carH < 3) return;
+        if (screenY <= 0 || screenY > CANVAS_HEIGHT) return;
+
+        ctx.save();
+        ctx.translate(screenX, screenY);
+
+        // Back view of the player's car (what truck sees)
+        ctx.fillStyle = '#DD2222';
+        ctx.fillRect(-carW / 2, -carH, carW, carH);
+        ctx.fillStyle = '#AA0000';
+        ctx.fillRect(-carW / 3, -carH + carH * 0.15, carW * 2 / 3, carH * 0.55);
+        ctx.fillStyle = '#66AACC';
+        ctx.fillRect(-carW * 0.22, -carH + carH * 0.2, carW * 0.44, carH * 0.2);
+
+        // Tail lights
+        ctx.fillStyle = '#FF3333';
+        ctx.fillRect(-carW / 2 + carW * 0.05, -carH * 0.12, carW * 0.15, carH * 0.1);
+        ctx.fillRect(carW / 2 - carW * 0.2, -carH * 0.12, carW * 0.15, carH * 0.1);
+
+        // Wheels
+        ctx.fillStyle = '#111';
+        const wheelW = carW * 0.12;
+        const wheelH = carH * 0.16;
+        ctx.fillRect(-carW / 2 - wheelW * 0.3, -carH * 0.75, wheelW, wheelH);
+        ctx.fillRect(carW / 2 - wheelW * 0.7, -carH * 0.75, wheelW, wheelH);
+        ctx.fillRect(-carW / 2 - wheelW * 0.3, -carH * 0.2, wheelW, wheelH);
+        ctx.fillRect(carW / 2 - wheelW * 0.7, -carH * 0.2, wheelW, wheelH);
+
+        ctx.restore();
+    }
+
+    function drawRearMirror() {
+        if (truckPosition < 0) return;
+
+        const truckDist = Math.max(0.1, (position - truckPosition) / SEGMENT_LENGTH);
+        const distFactor = clamp(1 - (truckDist / 45), 0, 1);
+
+        const mirrorW = 260;
+        const mirrorH = 92;
+        const mirrorX = (CANVAS_WIDTH - mirrorW) / 2;
+        const mirrorY = 14;
+
+        ctx.save();
+
+        // Mirror frame
+        ctx.fillStyle = '#1f1f1f';
+        roundRect(ctx, mirrorX - 5, mirrorY - 5, mirrorW + 10, mirrorH + 10, 10);
+        ctx.fill();
+        ctx.strokeStyle = '#666';
+        ctx.lineWidth = 2;
+        roundRect(ctx, mirrorX - 5, mirrorY - 5, mirrorW + 10, mirrorH + 10, 10);
+        ctx.stroke();
+
+        // Mirror glass background
+        const glassGrad = ctx.createLinearGradient(0, mirrorY, 0, mirrorY + mirrorH);
+        glassGrad.addColorStop(0, '#1c2b3f');
+        glassGrad.addColorStop(1, '#0d1420');
+        ctx.fillStyle = glassGrad;
+        roundRect(ctx, mirrorX, mirrorY, mirrorW, mirrorH, 8);
+        ctx.fill();
+
+        // Clip inside mirror
+        ctx.beginPath();
+        roundRect(ctx, mirrorX, mirrorY, mirrorW, mirrorH, 8);
+        ctx.clip();
+
+        // Road stripe hint in mirror
+        ctx.strokeStyle = 'rgba(220,220,220,0.35)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 6]);
+        ctx.beginPath();
+        ctx.moveTo(mirrorX + mirrorW / 2, mirrorY + mirrorH);
+        ctx.lineTo(mirrorX + mirrorW / 2, mirrorY + 8);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Aggressive truck visualization in mirror
+        const jitter = distFactor > 0.6 ? (Math.random() - 0.5) * 3 : 0;
+        const tx = mirrorX + mirrorW / 2 + jitter;
+        const ty = mirrorY + mirrorH - 8;
+        const tw = 72 + 120 * distFactor;
+        const th = 40 + 52 * distFactor;
+
+        // Headlight glare
+        if (distFactor > 0.2) {
+            const glareA = 0.12 + distFactor * 0.28;
+            ctx.fillStyle = `rgba(255,255,90,${glareA})`;
+            ctx.beginPath();
+            ctx.ellipse(tx - tw * 0.25, ty - th * 0.22, tw * 0.16, th * 0.3, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.ellipse(tx + tw * 0.05, ty - th * 0.22, tw * 0.16, th * 0.3, 0, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Body
+        ctx.fillStyle = '#0F4DB8';
+        ctx.fillRect(tx - tw / 2, ty - th, tw, th);
+        ctx.fillStyle = '#0A397F';
+        ctx.fillRect(tx - tw / 2, ty - th, tw * 0.34, th * 0.72);
+        ctx.fillStyle = '#0C428F';
+        ctx.fillRect(tx - tw / 2 + tw * 0.36, ty - th + th * 0.07, tw * 0.61, th * 0.83);
+
+        if (tw > 70) {
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${Math.max(10, Math.floor(th * 0.28))}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('大运', tx + tw * 0.12, ty - th * 0.45);
+        }
+
+        // Menacing lights
+        ctx.fillStyle = '#FFF14D';
+        ctx.fillRect(tx - tw * 0.45, ty - th * 0.2, tw * 0.1, th * 0.1);
+        ctx.fillRect(tx - tw * 0.2, ty - th * 0.2, tw * 0.1, th * 0.1);
+
+        // Danger tint when too close
+        if (truckDist < 18) {
+            const pulse = 0.1 + 0.15 * (Math.sin(Date.now() / 120) * 0.5 + 0.5);
+            ctx.fillStyle = `rgba(255,0,0,${pulse})`;
+            ctx.fillRect(mirrorX, mirrorY, mirrorW, mirrorH);
+        }
+
+        ctx.restore();
+    }
+
+    // ===== SECTION 7: COLLISION SYSTEM =====
+    let crashTimer = 0;
+    let crashIntensity = 0;
+    let stuckOnObstacle = false;  // Player is blocked by an obstacle
+
+    function checkCollisions() {
+        const playerSegIdx = Math.floor(position / SEGMENT_LENGTH);
+        const playerW = 0.18;
+
+        // --- Check obstacle/barrier collisions ---
+        let currentlyOverlapping = false;
+        for (let i = -1; i <= 2; i++) {
+            const checkIdx = playerSegIdx + i;
+            if (checkIdx < 0 || checkIdx >= segments.length) continue;
+            const seg = segments[checkIdx];
+
+            for (let j = 0; j < seg.sprites.length; j++) {
+                const sprite = seg.sprites[j];
+                if (sprite.source !== 'obstacle' && sprite.source !== 'barrier') continue;
+
+                const spriteW = sprite.width || 0.18;
+                if (overlap(playerX, playerW, sprite.offset, spriteW)) {
+                    const segZ = seg.index * SEGMENT_LENGTH;
+                    if (Math.abs(segZ - position) < SEGMENT_LENGTH * 1.5) {
+                        currentlyOverlapping = true;
+                        // Hit obstacle: full stop, player is stuck
+                        if (!stuckOnObstacle && speed > 0) {
+                            speed = 0;
+                            stuckOnObstacle = true;
+                            crashIntensity = 15;
+                            crashTimer = 0.3;  // Brief screen shake
+                        }
+                    }
+                }
+            }
+        }
+
+        // If player steered away from obstacle, they can move again
+        if (stuckOnObstacle && !currentlyOverlapping) {
+            stuckOnObstacle = false;
+        }
+
+        // --- Road edge: fly off = instant death ---
+        if (Math.abs(playerX) > 1.8) {
+            gameOverReason = 'offroad';
+            gameState = STATE.GAMEOVER;
+        }
+    }
+
+    // ===== SECTION 8: UI / HUD =====
+    function drawHUD() {
+        ctx.save();
+
+        // Speed (bottom-left)
+        ctx.fillStyle = 'rgba(0,0,0,0.65)';
+        roundRect(ctx, 10, CANVAS_HEIGHT - 55, 150, 45, 5);
+        ctx.fill();
+        const kph = Math.round(speed / MAX_SPEED * 280);
+        ctx.fillStyle = kph > 200 ? '#FF4444' : kph > 120 ? '#FFCC00' : '#00FF00';
+        ctx.font = 'bold 22px monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`${kph} km/h`, 20, CANVAS_HEIGHT - 32);
+
+        // Progress bar (top-center)
+        const pct = clamp(position / trackLength, 0, 1);
+        const barW = 220, barH = 14;
+        const barX = (CANVAS_WIDTH - barW) / 2, barY = 12;
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        roundRect(ctx, barX - 4, barY - 4, barW + 8, barH + 8, 4);
+        ctx.fill();
+        ctx.fillStyle = '#333';
+        ctx.fillRect(barX, barY, barW, barH);
+        ctx.fillStyle = '#00CC00';
+        ctx.fillRect(barX, barY, barW * pct, barH);
+        ctx.strokeStyle = '#666';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(barX, barY, barW, barH);
+
+        // Player icon on progress bar
+        const iconX = barX + barW * pct;
+        ctx.fillStyle = '#FF2222';
+        ctx.fillRect(iconX - 3, barY - 2, 6, barH + 4);
+
+        // Truck icon on progress bar
+        const truckPct = clamp(truckPosition / trackLength, 0, 1);
+        const truckIconX = barX + barW * truckPct;
+        ctx.fillStyle = '#1155CC';
+        ctx.fillRect(truckIconX - 4, barY - 2, 8, barH + 4);
+
+        // Distance labels
+        ctx.fillStyle = '#FFF';
+        ctx.font = '11px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('终点', barX + barW + 18, barY + barH / 2 + 1);
+
+        // Truck distance warning (bottom-right)
+        const truckDist = Math.max(0, (position - truckPosition) / SEGMENT_LENGTH);
+        ctx.fillStyle = 'rgba(0,0,0,0.65)';
+        roundRect(ctx, CANVAS_WIDTH - 200, CANVAS_HEIGHT - 55, 190, 45, 5);
+        ctx.fill();
+
+        if (truckDist > 40) ctx.fillStyle = '#00FF00';
+        else if (truckDist > 20) ctx.fillStyle = '#FFCC00';
+        else ctx.fillStyle = '#FF3333';
+
+        ctx.font = 'bold 16px monospace';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`大运: ${Math.round(truckDist)}m`, CANVAS_WIDTH - 20, CANVAS_HEIGHT - 38);
+
+        // Warning label
+        if (truckDist <= 20) {
+            ctx.fillStyle = '#FF6666';
+            ctx.font = '11px monospace';
+            ctx.fillText('危险!', CANVAS_WIDTH - 20, CANVAS_HEIGHT - 20);
+        }
+
+        // Red screen flash when very close
+        if (truckDist < 12 && Math.floor(Date.now() / 250) % 2 === 0) {
+            ctx.fillStyle = 'rgba(255,0,0,0.12)';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        }
+
+        // Camera mode indicator
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        roundRect(ctx, 10, 10, 170, 26, 4);
+        ctx.fill();
+        ctx.fillStyle = '#DDD';
+        ctx.font = '12px monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        const modeText = cameraMode === VIEW.MIRROR ? '后视镜: 开启' : '后视镜: 关闭';
+        ctx.fillText(`${modeText} (C切换)`, 18, 23);
+
+        ctx.restore();
+    }
+
+    function roundRect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+    }
+
+    function drawCountdown(count) {
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        if (count > 0) {
+            const num = Math.ceil(count);
+            const pulse = 1 + 0.2 * Math.sin(count * Math.PI * 2);
+            ctx.save();
+            ctx.translate(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 20);
+            ctx.scale(pulse, pulse);
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = 'bold 100px sans-serif';
+            ctx.fillText(num.toString(), 0, 0);
+            ctx.restore();
+        } else {
+            ctx.fillStyle = '#00FF00';
+            ctx.font = 'bold 70px sans-serif';
+            ctx.fillText('GO!', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 20);
+        }
+
+        ctx.fillStyle = '#BBBBBB';
+        ctx.font = '16px sans-serif';
+        ctx.fillText('方向键 / WASD 控制方向', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 60);
+        ctx.fillText('↑ 加速  ↓ 刹车  ← → 转向', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 85);
+    }
+
+    function drawMenuScreen() {
+        ctx.fillStyle = '#0a0a1a';
+        ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        // Road lines decoration
+        ctx.strokeStyle = '#222';
+        ctx.lineWidth = 1;
+        for (let i = 0; i < 20; i++) {
+            const y = 50 + i * 22;
+            ctx.beginPath();
+            ctx.moveTo(CANVAS_WIDTH / 2 - 100 + i * 3, y);
+            ctx.lineTo(CANVAS_WIDTH / 2 + 100 - i * 3, y);
+            ctx.stroke();
+        }
+
+        // Title
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        // Shadow
+        ctx.fillStyle = '#880000';
+        ctx.font = 'bold 52px sans-serif';
+        ctx.fillText('逃离大运', CANVAS_WIDTH / 2 + 3, CANVAS_HEIGHT / 3 + 3);
+
+        // Main title
+        ctx.fillStyle = '#FF3333';
+        ctx.font = 'bold 52px sans-serif';
+        ctx.fillText('逃离大运', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 3);
+
+        // Subtitle
+        ctx.fillStyle = '#888888';
+        ctx.font = '18px sans-serif';
+        ctx.fillText('ESCAPE FROM DAYUN', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 3 + 40);
+
+        // Truck icon
+        ctx.fillStyle = '#1155CC';
+        ctx.fillRect(CANVAS_WIDTH / 2 - 50, CANVAS_HEIGHT / 2 - 10, 100, 35);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 18px sans-serif';
+        ctx.fillText('大运', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 10);
+
+        // Arrow chasing car
+        ctx.fillStyle = '#FF2222';
+        ctx.fillRect(CANVAS_WIDTH / 2 - 12, CANVAS_HEIGHT / 2 + 40, 24, 14);
+        ctx.fillStyle = '#FFCC00';
+        ctx.font = '16px sans-serif';
+        ctx.fillText('↑', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 65);
+
+        // Start prompt (blink)
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = '20px sans-serif';
+        if (Math.floor(Date.now() / 500) % 2 === 0) {
+            ctx.fillText('按 ENTER 或 SPACE 开始', CANVAS_WIDTH / 2, CANVAS_HEIGHT * 0.76);
+        }
+
+        // Controls
+        ctx.fillStyle = '#666666';
+        ctx.font = '14px sans-serif';
+        ctx.fillText('↑/W 加速  ↓/S 刹车  ←/A →/D 转向', CANVAS_WIDTH / 2, CANVAS_HEIGHT * 0.86);
+        ctx.fillText('C 切换后视镜（看追击大运）', CANVAS_WIDTH / 2, CANVAS_HEIGHT * 0.89);
+        ctx.fillText('逃离大运卡车的追击，到达终点即可获胜！', CANVAS_WIDTH / 2, CANVAS_HEIGHT * 0.92);
+    }
+
+    function drawGameOverScreen() {
+        ctx.fillStyle = 'rgba(20,0,0,0.75)';
+        ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        if (gameOverReason === 'offroad') {
+            // Flew off road
+            ctx.fillStyle = '#FF6600';
+            ctx.font = 'bold 44px sans-serif';
+            ctx.fillText('冲出赛道了!', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 20);
+        } else {
+            // Caught by truck
+            ctx.fillStyle = '#1155CC';
+            ctx.fillRect(CANVAS_WIDTH / 2 - 60, CANVAS_HEIGHT / 4 - 20, 120, 50);
+            ctx.fillStyle = '#FFF';
+            ctx.font = 'bold 20px sans-serif';
+            ctx.fillText('大运', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 4 + 6);
+
+            ctx.fillStyle = '#FF0000';
+            ctx.font = 'bold 44px sans-serif';
+            ctx.fillText('被大运撞了!', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 20);
+        }
+
+        ctx.fillStyle = '#CCCCCC';
+        ctx.font = '22px sans-serif';
+        ctx.fillText('GAME OVER', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 25);
+
+        const dist = Math.round(position / SEGMENT_LENGTH);
+        ctx.fillStyle = '#999';
+        ctx.font = '16px sans-serif';
+        ctx.fillText(`行驶距离: ${dist}m  |  用时: ${gameTime.toFixed(1)}s`, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 60);
+
+        ctx.fillStyle = '#FFF';
+        ctx.font = '18px sans-serif';
+        if (Math.floor(Date.now() / 500) % 2 === 0) {
+            ctx.fillText('按 ENTER 重新开始', CANVAS_WIDTH / 2, CANVAS_HEIGHT * 0.75);
+        }
+    }
+
+    function drawWinScreen() {
+        ctx.fillStyle = 'rgba(0,15,0,0.7)';
+        ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        ctx.fillStyle = '#00FF00';
+        ctx.font = 'bold 50px sans-serif';
+        ctx.fillText('成功逃离!', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 3);
+
+        ctx.fillStyle = '#FFFF00';
+        ctx.font = 'bold 28px sans-serif';
+        ctx.fillText('YOU WIN!', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 3 + 50);
+
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = '20px sans-serif';
+        ctx.fillText(`通关用时: ${gameTime.toFixed(1)} 秒`, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 20);
+
+        const kphAvg = Math.round((trackLength / gameTime) / MAX_SPEED * 280);
+        ctx.fillStyle = '#AAAAAA';
+        ctx.font = '16px sans-serif';
+        ctx.fillText(`平均速度: ~${kphAvg} km/h`, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 50);
+
+        ctx.fillStyle = '#FFF';
+        ctx.font = '18px sans-serif';
+        if (Math.floor(Date.now() / 500) % 2 === 0) {
+            ctx.fillText('按 ENTER 再来一次', CANVAS_WIDTH / 2, CANVAS_HEIGHT * 0.75);
+        }
+    }
+
+    // ===== SECTION 9: GAME STATE MACHINE =====
+    let gameState = STATE.MENU;
+    let countdownTimer = 3.0;
+    let gameOverReason = '';
+
+    function resetGame() {
+        position = 0;
+        playerX = 0;
+        speed = 0;
+        truckPosition = -TRUCK_INITIAL_DISTANCE * SEGMENT_LENGTH;
+        truckSpeed = 0;
+        truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO;
+        truckX = 0;
+        gameTime = 0;
+        crashTimer = 0;
+        crashIntensity = 0;
+        stuckOnObstacle = false;
+        gameOverReason = '';
+        countdownTimer = 3.0;
+        keys.left = keys.right = keys.up = keys.down = false;
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            if (gameState === STATE.MENU) {
+                resetGame();
+                gameState = STATE.COUNTDOWN;
+                e.preventDefault();
+            } else if (gameState === STATE.GAMEOVER || gameState === STATE.WIN) {
+                resetGame();
+                gameState = STATE.COUNTDOWN;
+                e.preventDefault();
+            }
+        }
+    });
+
+    // ===== SECTION 10: GAME LOOP =====
+    let lastTimestamp = 0;
+    const FIXED_DT = 1 / 60;
+    let accumulator = 0;
+
+    function gameLoop(timestamp) {
+        const rawDt = (timestamp - lastTimestamp) / 1000;
+        const frameTime = Math.min(rawDt, 0.1);
+        lastTimestamp = timestamp;
+
+        ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        switch (gameState) {
+            case STATE.MENU:
+                drawMenuScreen();
+                break;
+
+            case STATE.COUNTDOWN:
+                accumulator += frameTime;
+                while (accumulator >= FIXED_DT) {
+                    countdownTimer -= FIXED_DT;
+                    accumulator -= FIXED_DT;
+                }
+                renderBackground(0);
+                renderRoad(position, playerX);
+                drawPlayerCar();
+                drawCountdown(countdownTimer);
+                if (countdownTimer <= -0.6) {
+                    gameState = STATE.PLAYING;
+                    accumulator = 0;
+                }
+                break;
+
+            case STATE.PLAYING:
+                accumulator += frameTime;
+                while (accumulator >= FIXED_DT) {
+                    updatePlayer(FIXED_DT);
+                    updateTruck(FIXED_DT);
+                    checkCollisions();
+                    if (crashTimer > 0) {
+                        crashTimer -= FIXED_DT;
+                    }
+                    accumulator -= FIXED_DT;
+                }
+
+                // Check win
+                const finishIdx = segments.findIndex(s => s.isFinish);
+                if (finishIdx >= 0 && position >= finishIdx * SEGMENT_LENGTH) {
+                    gameState = STATE.WIN;
+                }
+
+                // Apply screen shake
+                if (crashTimer > 0) {
+                    ctx.save();
+                    const sx = (Math.random() - 0.5) * crashIntensity;
+                    const sy = (Math.random() - 0.5) * crashIntensity;
+                    ctx.translate(sx, sy);
+                    crashIntensity *= 0.92;
+                }
+
+                const cameraPos = position;
+                const cameraX = playerX;
+                renderBackground(findSegment(cameraPos).curve);
+                renderRoad(cameraPos, cameraX);
+                drawTruck(cameraPos);
+                drawPlayerCar();
+                if (cameraMode === VIEW.MIRROR) drawRearMirror();
+                drawHUD();
+
+                if (crashTimer > 0) ctx.restore();
+                break;
+
+            case STATE.GAMEOVER:
+                drawGameOverScreen();
+                break;
+
+            case STATE.WIN:
+                drawWinScreen();
+                break;
+        }
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    // ===== SECTION 11: INITIALIZATION =====
+    function init() {
+        canvas.width = CANVAS_WIDTH;
+        canvas.height = CANVAS_HEIGHT;
+
+        function resizeCanvas() {
+            const scaleX = window.innerWidth / CANVAS_WIDTH;
+            const scaleY = window.innerHeight / CANVAS_HEIGHT;
+            const scale = Math.min(scaleX, scaleY);
+            canvas.style.width = (CANVAS_WIDTH * scale) + 'px';
+            canvas.style.height = (CANVAS_HEIGHT * scale) + 'px';
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        buildTrack();
+        gameState = STATE.MENU;
+        lastTimestamp = performance.now();
+        requestAnimationFrame(gameLoop);
+    }
+
+    window.addEventListener('load', init);
+    </script>
+</body>
+</html>
