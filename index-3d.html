@@ -1,0 +1,1282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>逃离大运 3D - Escape from DAYUN</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; overflow: hidden; }
+        #hud {
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%;
+            pointer-events: none;
+            font-family: monospace;
+        }
+        #speedometer {
+            position: absolute; bottom: 20px; left: 20px;
+            background: rgba(0,0,0,0.65); border-radius: 8px;
+            padding: 8px 16px; font-size: 22px; font-weight: bold;
+            color: #00FF00; min-width: 140px;
+        }
+        #progress-wrap {
+            position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+            width: 220px;
+        }
+        #progress-bg {
+            background: #333; height: 14px; border-radius: 3px;
+            overflow: visible; position: relative;
+        }
+        #progress-bar { background: #00CC00; height: 100%; border-radius: 3px; }
+        #progress-player-icon {
+            position: absolute; top: -3px; width: 6px; height: 20px;
+            background: #FF2222; transform: translateX(-50%);
+        }
+        #progress-truck-icon {
+            position: absolute; top: -3px; width: 8px; height: 20px;
+            background: #1155CC; transform: translateX(-50%);
+        }
+        #progress-label {
+            color: #fff; font-size: 11px; font-family: monospace;
+            text-align: right; margin-top: 2px;
+        }
+        #truck-dist {
+            position: absolute; bottom: 20px; right: 20px;
+            background: rgba(0,0,0,0.65); border-radius: 8px;
+            padding: 8px 16px; font-size: 16px; font-weight: bold;
+            color: #00FF00; text-align: right;
+        }
+        #cam-mode {
+            position: absolute; top: 40px; left: 20px;
+            background: rgba(0,0,0,0.6); border-radius: 4px;
+            padding: 4px 10px; font-size: 12px; color: #DDD;
+        }
+        #mirror-hud {
+            display: none;
+            position: absolute; top: 32px; left: 50%; transform: translateX(-50%);
+            width: 270px; height: 100px;
+            background: #0d1420; border-radius: 10px;
+            border: 4px solid #444; overflow: hidden;
+        }
+        #overlay {
+            display: none;
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.75);
+            align-items: center; justify-content: center;
+            flex-direction: column; text-align: center;
+            pointer-events: auto;
+        }
+        #overlay.show { display: flex; }
+        #overlay-title {
+            font-size: 52px; font-weight: bold; color: #FF3333;
+            font-family: sans-serif; text-shadow: 3px 3px 0 #880000;
+            margin-bottom: 12px;
+        }
+        #overlay-sub {
+            font-size: 20px; color: #888; font-family: sans-serif;
+            margin-bottom: 10px;
+        }
+        #overlay-info {
+            font-size: 16px; color: #999; font-family: monospace;
+            margin-bottom: 30px;
+        }
+        #overlay-prompt {
+            font-size: 20px; color: #FFF; font-family: sans-serif;
+            animation: blink 1s step-start infinite;
+        }
+        @keyframes blink { 50% { opacity: 0; } }
+        #countdown-overlay {
+            display: none;
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.4);
+            align-items: center; justify-content: center;
+            flex-direction: column;
+            pointer-events: none;
+        }
+        #countdown-overlay.show { display: flex; }
+        #countdown-num {
+            font-size: 130px; color: #FFF; font-weight: bold;
+            font-family: sans-serif; text-shadow: 0 0 40px #FFF;
+        }
+        #countdown-hint {
+            font-size: 16px; color: #BBBBBB; font-family: sans-serif;
+            margin-top: 20px;
+        }
+        #danger-flash {
+            display: none;
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(255,0,0,0.12);
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+<div id="hud">
+    <div id="speedometer">0 km/h</div>
+
+    <div id="progress-wrap">
+        <div id="progress-bg">
+            <div id="progress-bar" style="width:0%"></div>
+            <div id="progress-player-icon" style="left:0%"></div>
+            <div id="progress-truck-icon" style="left:0%"></div>
+        </div>
+        <div id="progress-label">终点</div>
+    </div>
+
+    <div id="truck-dist">大运: --m</div>
+    <div id="cam-mode">后视镜: 关闭 (C切换)</div>
+
+    <div id="mirror-hud">
+        <canvas id="mirrorCanvas" width="270" height="100"></canvas>
+    </div>
+
+    <div id="danger-flash"></div>
+</div>
+
+<!-- Menu / Game Over / Win overlay -->
+<div id="overlay">
+    <div id="overlay-title">逃离大运</div>
+    <div id="overlay-sub">ESCAPE FROM DAYUN</div>
+    <div id="overlay-info"></div>
+    <div id="overlay-prompt">按 ENTER 或 SPACE 开始</div>
+</div>
+
+<!-- Countdown overlay -->
+<div id="countdown-overlay">
+    <div id="countdown-num">3</div>
+    <div id="countdown-hint">方向键 / WASD 控制方向<br>↑ 加速 &nbsp; ↓ 刹车 &nbsp; ← → 转向</div>
+</div>
+
+<script type="importmap">
+{
+    "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js"
+    }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ===== SECTION 1: CONSTANTS & CONFIGURATION =====
+const SEGMENT_LENGTH = 200;
+const ROAD_WIDTH = 2000;
+const RUMBLE_LENGTH = 3;
+const LANES = 3;
+const DRAW_DISTANCE = 200;
+const FIELD_OF_VIEW = 100;
+const CAMERA_HEIGHT = 1000;
+
+const MAX_SPEED = SEGMENT_LENGTH * 60;
+const ACCEL = MAX_SPEED / 5;
+const BRAKE_DECEL = -MAX_SPEED;
+const NATURAL_DECEL = -MAX_SPEED / 5;
+const OFF_ROAD_DECEL = -MAX_SPEED / 2;
+const OFF_ROAD_LIMIT = MAX_SPEED / 4;
+const CENTRIFUGAL_FORCE = 0.3;
+
+const TRUCK_INITIAL_DISTANCE = 40;
+const TRUCK_SPEED_RATIO = 0.75;
+const TRUCK_CATCHUP_ACCEL = 0.003;
+const TRUCK_GAME_OVER_DIST = 3;
+const MIRROR_ZOOM_START_DIST = 320;
+const MIRROR_ZOOM_END_DIST = 18;
+
+// 3D-specific
+const CURVE_TO_ANGLE = 0.006;
+const CAM_HEIGHT_3D = 1100;
+const CAM_FOLLOW_DIST = 2800;
+const CAM_LOOK_AHEAD = 5000;
+const CAM_FOV = 72;
+
+const COLORS = {
+    SKY: '#72D7EE',
+    TREE: '#005108',
+    LIGHT: { road: '#6B6B6B', rumble: '#555555', grass: '#10AA10', lane: '#CCCCCC' },
+    DARK:  { road: '#696969', rumble: '#BBBBBB', grass: '#009A00', lane: '#696969' },
+    FINISH: { road: '#333333', rumble: '#FF0000', grass: '#10AA10', lane: '#FFFFFF' }
+};
+
+const CURVE = { NONE: 0, EASY: 2, MEDIUM: 4, HARD: 6, SHARP: 10 };
+const STATE = { MENU: 'menu', COUNTDOWN: 'countdown', PLAYING: 'playing', GAMEOVER: 'gameover', WIN: 'win' };
+const VIEW = { PLAYER: 'player', MIRROR: 'mirror' };
+
+// ===== SECTION 2: UTILITY FUNCTIONS =====
+function clamp(value, min, max) { return Math.max(min, Math.min(value, max)); }
+function interpolate(a, b, percent) { return a + (b - a) * percent; }
+function percentRemaining(n, total) { return (n % total) / total; }
+
+function overlap(x1, w1, x2, w2) {
+    const half1 = w1 / 2, half2 = w2 / 2;
+    return !((x1 + half1) < (x2 - half2) || (x1 - half1) > (x2 + half2));
+}
+
+// ===== SECTION 3: ROAD/TRACK BUILDER =====
+let segments = [];
+let trackLength = 0;
+
+function addSegment(curve) {
+    const n = segments.length;
+    const isLight = Math.floor(n / RUMBLE_LENGTH) % 2 === 0;
+    segments.push({
+        index: n,
+        curve: curve,
+        color: isLight ? COLORS.LIGHT : COLORS.DARK,
+        sprites: [],
+        isFinish: false,
+        world3d: { x: 0, z: 0, angle: 0 }
+    });
+}
+
+function addStraight(num) {
+    for (let i = 0; i < num; i++) addSegment(CURVE.NONE);
+}
+
+function addCurve(num, curve, easeIn, easeOut) {
+    easeIn = easeIn || 0;
+    easeOut = easeOut || 0;
+    const mid = num - easeIn - easeOut;
+    for (let i = 0; i < easeIn; i++) addSegment(interpolate(0, curve, i / easeIn));
+    for (let i = 0; i < mid; i++) addSegment(curve);
+    for (let i = 0; i < easeOut; i++) addSegment(interpolate(curve, 0, i / easeOut));
+}
+
+function addSharpTurn(dir) {
+    addCurve(40, CURVE.SHARP * dir, 8, 8);
+}
+
+function buildTrack() {
+    segments = [];
+    addStraight(50);
+    addCurve(80, CURVE.MEDIUM, 15, 15);
+    addStraight(60);
+    addSharpTurn(-1);
+
+    const obsStart = segments.length;
+    addStraight(80);
+    const offsets = [
+        [15, -0.5, 0.18],[30, 0.35, 0.18],[45, 0.0, 0.18],
+        [55, -0.4, 0.15],[55, 0.5, 0.15],[70, 0.2, 0.2]
+    ];
+    offsets.forEach(([idx, off, w]) => {
+        if (segments[obsStart + idx]) {
+            segments[obsStart + idx].sprites.push({ source: 'obstacle', offset: off, width: w });
+        }
+    });
+
+    addSharpTurn(1);
+
+    const narrowStart = segments.length;
+    addStraight(40);
+    for (let i = narrowStart; i < segments.length; i++) {
+        segments[i].sprites.push({ source: 'barrier', offset: -0.75, width: 0.35 });
+        segments[i].sprites.push({ source: 'barrier', offset: 0.75, width: 0.35 });
+    }
+
+    addCurve(60, -CURVE.EASY, 10, 10);
+    addStraight(80);
+
+    for (let i = segments.length - 12; i < segments.length - 2; i++) {
+        if (segments[i]) {
+            segments[i].color = COLORS.FINISH;
+            segments[i].isFinish = true;
+        }
+    }
+
+    // Trees
+    for (let i = 0; i < segments.length; i++) {
+        if (i % 10 === 0) segments[i].sprites.push({ source: 'tree', offset: -1.6 });
+        if (i % 13 === 0) segments[i].sprites.push({ source: 'tree', offset: 1.8 });
+        if (i % 17 === 0) segments[i].sprites.push({ source: 'tree', offset: -2.0 });
+        if (i % 21 === 0) segments[i].sprites.push({ source: 'tree', offset: 2.2 });
+    }
+
+    trackLength = segments.length * SEGMENT_LENGTH;
+}
+
+function findSegment(z) {
+    const idx = Math.floor(z / SEGMENT_LENGTH) % segments.length;
+    return segments[idx < 0 ? 0 : idx];
+}
+
+// ===== SECTION 3B: TRACK 3D GEOMETRY =====
+function buildTrack3DPositions() {
+    let wx = 0, wz = 0, angle = 0;
+    for (let i = 0; i < segments.length; i++) {
+        segments[i].world3d = { x: wx, z: wz, angle: angle };
+        wz -= Math.cos(angle) * SEGMENT_LENGTH;
+        wx += Math.sin(angle) * SEGMENT_LENGTH;
+        angle += segments[i].curve * CURVE_TO_ANGLE;
+    }
+}
+
+// Convert game logic coords to Three.js world coords
+function gameToWorld(pos, lateralX) {
+    const segIdx = clamp(Math.floor(pos / SEGMENT_LENGTH), 0, segments.length - 1);
+    const seg = segments[segIdx];
+    const a = seg.world3d.angle;
+    const px = seg.world3d.x + Math.cos(a) * lateralX * ROAD_WIDTH / 2;
+    const pz = seg.world3d.z + Math.sin(a) * lateralX * ROAD_WIDTH / 2;
+    return new THREE.Vector3(px, 0, pz);
+}
+
+// ===== SECTION 4: THREE.JS SCENE SETUP =====
+let renderer, scene, camera;
+let roadMeshes = [];
+let spriteMeshes = []; // {mesh, segIdx, offset}
+let playerCarMesh, truckMesh;
+
+// Shared materials
+const matRoadLight   = new THREE.MeshLambertMaterial({ color: 0x6B6B6B });
+const matRoadDark    = new THREE.MeshLambertMaterial({ color: 0x696969 });
+const matRoadFinish  = new THREE.MeshLambertMaterial({ color: 0x333333 });
+const matRumbleLight = new THREE.MeshLambertMaterial({ color: 0x555555 });
+const matRumbleDark  = new THREE.MeshLambertMaterial({ color: 0xBBBBBB });
+const matRumbleFinish= new THREE.MeshLambertMaterial({ color: 0xFF0000 });
+const matGrassLight  = new THREE.MeshLambertMaterial({ color: 0x10AA10 });
+const matGrassDark   = new THREE.MeshLambertMaterial({ color: 0x009A00 });
+const matLane        = new THREE.MeshLambertMaterial({ color: 0xCCCCCC });
+
+function setupRenderer() {
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x72D7EE);
+    document.body.insertBefore(renderer.domElement, document.getElementById('hud'));
+
+    window.addEventListener('resize', () => {
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+    });
+}
+
+function setupCamera() {
+    camera = new THREE.PerspectiveCamera(
+        CAM_FOV,
+        window.innerWidth / window.innerHeight,
+        10,
+        SEGMENT_LENGTH * DRAW_DISTANCE * 2
+    );
+}
+
+function setupLighting() {
+    scene.add(new THREE.AmbientLight(0xFFFFFF, 0.65));
+
+    const sun = new THREE.DirectionalLight(0xFFFBE6, 1.2);
+    sun.position.set(5000, 8000, 3000);
+    scene.add(sun);
+
+    const hemi = new THREE.HemisphereLight(0x87CEEB, 0x228B22, 0.45);
+    scene.add(hemi);
+}
+
+function buildRoadMeshes() {
+    roadMeshes.forEach(m => scene.remove(m));
+    roadMeshes = [];
+
+    const roadW = ROAD_WIDTH;
+    const segLen = SEGMENT_LENGTH;
+    const rumbleW = roadW * 0.12;
+    const grassW  = roadW * 6;
+
+    for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        const next = segments[(i + 1) % segments.length];
+        const w3 = seg.world3d;
+        const n3 = next.world3d;
+        const avgAngle = (w3.angle + n3.angle) / 2;
+        const cx = (w3.x + n3.x) / 2;
+        const cz = (w3.z + n3.z) / 2;
+
+        // Choose materials
+        let matRoad, matRumble, matGrass;
+        if (seg.isFinish) {
+            matRoad = matRoadFinish; matRumble = matRumbleFinish; matGrass = matGrassLight;
+        } else if (seg.color === COLORS.DARK) {
+            matRoad = matRoadDark; matRumble = matRumbleDark; matGrass = matGrassDark;
+        } else {
+            matRoad = matRoadLight; matRumble = matRumbleLight; matGrass = matGrassLight;
+        }
+
+        function makeFlat(w, l, mat, offsetX = 0) {
+            const geo = new THREE.PlaneGeometry(w, l);
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.rotation.z = -avgAngle;
+            const perpX = Math.cos(avgAngle) * offsetX;
+            const perpZ = Math.sin(avgAngle) * offsetX;
+            mesh.position.set(cx + perpX, 0, cz + perpZ);
+            mesh.receiveShadow = false;
+            scene.add(mesh);
+            roadMeshes.push(mesh);
+            return mesh;
+        }
+
+        // Grass (left + right)
+        makeFlat(grassW, segLen * 1.02, matGrass, -grassW * 0.4);
+        makeFlat(grassW, segLen * 1.02, matGrass,  grassW * 0.4);
+
+        // Road surface
+        makeFlat(roadW, segLen * 1.02, matRoad);
+
+        // Rumble strips
+        makeFlat(rumbleW, segLen * 1.02, matRumble, -(roadW / 2 + rumbleW / 2));
+        makeFlat(rumbleW, segLen * 1.02, matRumble,  (roadW / 2 + rumbleW / 2));
+
+        // Lane markings (only light segments to alternate)
+        if (seg.color === COLORS.LIGHT && !seg.isFinish) {
+            const laneW = roadW / 60;
+            for (let lane = 1; lane < LANES; lane++) {
+                const laneOffsetX = -roadW / 2 + (roadW / LANES) * lane;
+                makeFlat(laneW, segLen * 0.45, matLane, laneOffsetX);
+            }
+        }
+    }
+}
+
+// ===== SECTION 4B: 3D MODELS =====
+function makeCanvasTex(w, h, drawFn) {
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    drawFn(cv.getContext('2d'), w, h);
+    return new THREE.CanvasTexture(cv);
+}
+
+function createPlayerCar() {
+    const g = new THREE.Group();
+    const add = (geo, color, x, y, z, rx = 0) => {
+        const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color }));
+        m.rotation.x = rx;
+        m.position.set(x, y, z);
+        g.add(m);
+        return m;
+    };
+    // Body
+    add(new THREE.BoxGeometry(560, 300, 1100), 0xFF2222,  0, 250, 0);
+    // Roof
+    add(new THREE.BoxGeometry(460, 220, 650),  0xCC0000,  0, 470, -80);
+    // Windshield
+    add(new THREE.BoxGeometry(430, 170, 30),   0x88CCFF,  0, 420,  290);
+    // Rear window
+    add(new THREE.BoxGeometry(380, 140, 30),   0x6699CC,  0, 400, -370);
+    // Headlights
+    add(new THREE.BoxGeometry(90, 55, 20),     0xFFFFAA, -170, 240,  560);
+    add(new THREE.BoxGeometry(90, 55, 20),     0xFFFFAA,  170, 240,  560);
+    // Tail lights
+    add(new THREE.BoxGeometry(80, 50, 20),     0xFF3333, -175, 240, -560);
+    add(new THREE.BoxGeometry(80, 50, 20),     0xFF3333,  175, 240, -560);
+    // Wheels
+    const wGeo = new THREE.CylinderGeometry(110, 110, 70, 14);
+    const wMat = new THREE.MeshLambertMaterial({ color: 0x111111 });
+    [[-290, 100,  370], [290, 100,  370],
+     [-290, 100, -370], [290, 100, -370]].forEach(([wx, wy, wz]) => {
+        const w = new THREE.Mesh(wGeo, wMat);
+        w.rotation.z = Math.PI / 2;
+        w.position.set(wx, wy, wz);
+        g.add(w);
+    });
+    return g;
+}
+
+function createTruck() {
+    const g = new THREE.Group();
+    const add = (geo, color, x, y, z) => {
+        const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color }));
+        m.position.set(x, y, z);
+        g.add(m);
+        return m;
+    };
+    // Cargo body
+    add(new THREE.BoxGeometry(900, 950, 2200), 0x0E4499, 0, 625, -400);
+    // Cab
+    add(new THREE.BoxGeometry(900, 800, 700),  0x0D3D8A, 0, 530,  850);
+    // Windshield
+    add(new THREE.BoxGeometry(680, 300, 25),   0xAADDFF, 0, 650, 1205);
+    // Bumper
+    add(new THREE.BoxGeometry(900, 120, 60),   0x333333, 0, 120, 1200);
+
+    // "大运" sign on cargo front face
+    const dayunTex = makeCanvasTex(256, 128, (ctx, w, h) => {
+        ctx.fillStyle = '#0E4499';
+        ctx.fillRect(0, 0, w, h);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 88px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('大运', w / 2, h / 2);
+    });
+    const signGeo = new THREE.PlaneGeometry(700, 340);
+    const sign = new THREE.Mesh(signGeo, new THREE.MeshBasicMaterial({ map: dayunTex }));
+    sign.position.set(0, 700, 510);
+    g.add(sign);
+
+    // Headlights
+    const hlGeo = new THREE.BoxGeometry(130, 80, 25);
+    const hlMat = new THREE.MeshBasicMaterial({ color: 0xFFFF44 });
+    [-280, 280].forEach(lx => {
+        const hl = new THREE.Mesh(hlGeo, hlMat);
+        hl.position.set(lx, 480, 1215);
+        g.add(hl);
+    });
+
+    // Wheels (6)
+    const wGeo = new THREE.CylinderGeometry(150, 150, 90, 14);
+    const wMat = new THREE.MeshLambertMaterial({ color: 0x111111 });
+    [[-500, 130,  800], [500, 130,  800],
+     [-500, 130, -200], [500, 130, -200],
+     [-500, 130, -1200],[500, 130, -1200]].forEach(([wx, wy, wz]) => {
+        const w = new THREE.Mesh(wGeo, wMat);
+        w.rotation.z = Math.PI / 2;
+        w.position.set(wx, wy, wz);
+        g.add(w);
+    });
+    return g;
+}
+
+function createObstacleMesh() {
+    const g = new THREE.Group();
+    // Wooden crate
+    const boxMat = new THREE.MeshLambertMaterial({ color: 0xB8860B });
+    const box = new THREE.Mesh(new THREE.BoxGeometry(280, 280, 280), boxMat);
+    box.position.y = 140;
+    g.add(box);
+    // Plank strips
+    const stripMat = new THREE.MeshLambertMaterial({ color: 0x9A6F0A });
+    for (let i = 0; i < 4; i++) {
+        const s = new THREE.Mesh(new THREE.BoxGeometry(286, 14, 286), stripMat);
+        s.position.y = 50 + i * 65;
+        g.add(s);
+    }
+    // Warning sign face
+    const sigTex = makeCanvasTex(64, 64, (ctx, w, h) => {
+        ctx.clearRect(0,0,w,h);
+        ctx.fillStyle = '#FF0000';
+        ctx.beginPath();
+        ctx.moveTo(32,2); ctx.lineTo(62,32); ctx.lineTo(32,62); ctx.lineTo(2,32);
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 34px sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('!', 32, 33);
+    });
+    const sGeo = new THREE.PlaneGeometry(180, 180);
+    const sMat = new THREE.MeshBasicMaterial({ map: sigTex, transparent: true });
+    const sf = new THREE.Mesh(sGeo, sMat);
+    sf.position.set(0, 160, 142);
+    g.add(sf);
+    const sb = new THREE.Mesh(sGeo, sMat);
+    sb.position.set(0, 160, -142);
+    sb.rotation.y = Math.PI;
+    g.add(sb);
+    return g;
+}
+
+function createBarrierMesh() {
+    const g = new THREE.Group();
+    const main = new THREE.Mesh(
+        new THREE.BoxGeometry(260, 500, 180),
+        new THREE.MeshLambertMaterial({ color: 0x888888 })
+    );
+    main.position.y = 250;
+    g.add(main);
+    const top = new THREE.Mesh(
+        new THREE.BoxGeometry(260, 55, 190),
+        new THREE.MeshLambertMaterial({ color: 0xFF0000 })
+    );
+    top.position.y = 527;
+    g.add(top);
+    const stripe = new THREE.Mesh(
+        new THREE.BoxGeometry(260, 40, 190),
+        new THREE.MeshLambertMaterial({ color: 0xAAAAAA })
+    );
+    stripe.position.y = 260;
+    g.add(stripe);
+    return g;
+}
+
+function createTreeMesh() {
+    const g = new THREE.Group();
+    const trunk = new THREE.Mesh(
+        new THREE.CylinderGeometry(55, 75, 580, 8),
+        new THREE.MeshLambertMaterial({ color: 0x4A2F00 })
+    );
+    trunk.position.y = 290;
+    g.add(trunk);
+    const crown = new THREE.Mesh(
+        new THREE.SphereGeometry(360, 8, 6),
+        new THREE.MeshLambertMaterial({ color: 0x005108 })
+    );
+    crown.position.y = 860;
+    g.add(crown);
+    return g;
+}
+
+// Build all sprite meshes from track data
+function buildSpriteMeshes() {
+    spriteMeshes.forEach(s => scene.remove(s.mesh));
+    spriteMeshes = [];
+
+    for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        const w3 = seg.world3d;
+        const a = w3.angle;
+
+        seg.sprites.forEach(sprite => {
+            let mesh;
+            if (sprite.source === 'tree') {
+                mesh = createTreeMesh();
+            } else if (sprite.source === 'obstacle') {
+                mesh = createObstacleMesh();
+            } else if (sprite.source === 'barrier') {
+                mesh = createBarrierMesh();
+            } else {
+                return;
+            }
+
+            // Position: perpendicular offset from road center
+            const lateralX = sprite.offset; // in normalized coords (-1=left edge)
+            const wx = w3.x + Math.cos(a) * lateralX * ROAD_WIDTH / 2;
+            const wz = w3.z + Math.sin(a) * lateralX * ROAD_WIDTH / 2;
+            mesh.position.set(wx, 0, wz);
+            mesh.rotation.y = -a;
+            scene.add(mesh);
+            spriteMeshes.push({ mesh, segIdx: i, offset: sprite.offset });
+        });
+    }
+}
+
+function setupScene() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x72D7EE);
+    scene.fog = new THREE.Fog(0x72D7EE, SEGMENT_LENGTH * 100, SEGMENT_LENGTH * DRAW_DISTANCE * 1.1);
+
+    setupLighting();
+
+    // Mountains (static decorative meshes)
+    const mountainMat = new THREE.MeshLambertMaterial({ color: 0x2a5a3a });
+    const mountainMat2 = new THREE.MeshLambertMaterial({ color: 0x1a3a2a });
+    const peakData = [
+        { x: -8000, z: -15000, h: 4000, r: 3000 },
+        { x: 10000, z: -14000, h: 3500, r: 2800 },
+        { x: -4000, z: -25000, h: 7000, r: 5000 },
+    ];
+    peakData.forEach(p => {
+        const cone = new THREE.Mesh(
+            new THREE.ConeGeometry(p.r, p.h, 8),
+            mountainMat
+        );
+        cone.position.set(p.x, p.h / 2, p.z);
+        scene.add(cone);
+        const cone2 = new THREE.Mesh(
+            new THREE.ConeGeometry(p.r * 1.4, p.h * 0.7, 8),
+            mountainMat2
+        );
+        cone2.position.set(p.x + p.r * 0.3, p.h * 0.35, p.z - p.r * 0.5);
+        scene.add(cone2);
+    });
+
+    // Player car
+    playerCarMesh = createPlayerCar();
+    scene.add(playerCarMesh);
+
+    // Truck
+    truckMesh = createTruck();
+    scene.add(truckMesh);
+}
+
+function updateCamera() {
+    if (gameState !== STATE.PLAYING && gameState !== STATE.COUNTDOWN) return;
+
+    const playerPos3 = gameToWorld(position, playerX);
+    const segIdx = clamp(Math.floor(position / SEGMENT_LENGTH), 0, segments.length - 1);
+    const seg = segments[segIdx];
+    const angle = seg.world3d.angle;
+
+    // Camera behind the player
+    camera.position.x = playerPos3.x - Math.sin(angle) * CAM_FOLLOW_DIST;
+    camera.position.y = CAM_HEIGHT_3D;
+    camera.position.z = playerPos3.z + Math.cos(angle) * CAM_FOLLOW_DIST;
+
+    // Look toward the road ahead
+    const aheadIdx = clamp(
+        Math.floor((position + CAM_LOOK_AHEAD) / SEGMENT_LENGTH),
+        0, segments.length - 1
+    );
+    const aheadSeg = segments[aheadIdx];
+    camera.lookAt(aheadSeg.world3d.x, 0, aheadSeg.world3d.z);
+}
+
+function updateScene3D() {
+    // Player car
+    const pp = gameToWorld(position, playerX);
+    const pSegIdx = clamp(Math.floor(position / SEGMENT_LENGTH), 0, segments.length - 1);
+    const pSeg = segments[pSegIdx];
+    playerCarMesh.position.set(pp.x, 130, pp.z);
+    playerCarMesh.rotation.y = -pSeg.world3d.angle + Math.PI;
+
+    // Tilt on steering
+    let tilt = 0;
+    if (keys.left && speed > 0) tilt = 0.06;
+    if (keys.right && speed > 0) tilt = -0.06;
+    playerCarMesh.rotation.z = tilt;
+
+    // Truck
+    if (truckPosition >= 0) {
+        const tp = gameToWorld(truckPosition, truckX);
+        const tSegIdx = clamp(Math.floor(truckPosition / SEGMENT_LENGTH), 0, segments.length - 1);
+        const tSeg = segments[tSegIdx];
+        truckMesh.visible = true;
+        truckMesh.position.set(tp.x, 240, tp.z);
+        truckMesh.rotation.y = -tSeg.world3d.angle + Math.PI;
+    } else {
+        truckMesh.visible = false;
+    }
+}
+
+// ===== SECTION 5: PLAYER CAR =====
+let playerX = 0;
+let speed = 0;
+let position = 0;
+let cameraMode = VIEW.PLAYER;
+
+const keys = { left: false, right: false, up: false, down: false };
+
+document.addEventListener('keydown', (e) => {
+    switch (e.key) {
+        case 'ArrowLeft':  case 'a': case 'A': keys.left = true;  e.preventDefault(); break;
+        case 'ArrowRight': case 'd': case 'D': keys.right = true; e.preventDefault(); break;
+        case 'ArrowUp':    case 'w': case 'W': keys.up = true;    e.preventDefault(); break;
+        case 'ArrowDown':  case 's': case 'S': keys.down = true;  e.preventDefault(); break;
+        case 'c': case 'C':
+            cameraMode = (cameraMode === VIEW.PLAYER) ? VIEW.MIRROR : VIEW.PLAYER;
+            e.preventDefault(); break;
+    }
+});
+document.addEventListener('keyup', (e) => {
+    switch (e.key) {
+        case 'ArrowLeft':  case 'a': case 'A': keys.left = false;  break;
+        case 'ArrowRight': case 'd': case 'D': keys.right = false; break;
+        case 'ArrowUp':    case 'w': case 'W': keys.up = false;    break;
+        case 'ArrowDown':  case 's': case 'S': keys.down = false;  break;
+    }
+});
+
+function updatePlayer(dt) {
+    const playerSeg = findSegment(position);
+    const speedPercent = speed / MAX_SPEED;
+
+    if (stuckOnObstacle) {
+        speed = 0;
+    } else if (keys.up) {
+        speed += ACCEL * dt;
+    } else if (keys.down) {
+        speed += BRAKE_DECEL * dt;
+    } else {
+        speed += NATURAL_DECEL * dt;
+    }
+
+    const steerSpeed = 3.0;
+    const steerAmount = stuckOnObstacle ? 1.5 * dt : steerSpeed * dt * Math.max(speedPercent, 0.1);
+    if (keys.left)  playerX -= steerAmount;
+    if (keys.right) playerX += steerAmount;
+
+    playerX -= (playerSeg.curve * CENTRIFUGAL_FORCE * speedPercent * speedPercent * dt);
+
+    if (playerX < -1 || playerX > 1) {
+        if (speed > OFF_ROAD_LIMIT) speed += OFF_ROAD_DECEL * dt;
+    }
+
+    speed = clamp(speed, 0, MAX_SPEED);
+    position += speed * dt;
+    if (position >= trackLength) position = trackLength;
+}
+
+
+// ===== SECTION 6: DAYUN TRUCK AI =====
+let truckPosition = 0;
+let truckSpeed = 0;
+let truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO;
+let truckX = 0;
+let gameTime = 0;
+let truckDelay = 1.0;
+
+function updateTruck(dt) {
+    gameTime += dt;
+    if (position / trackLength < 0.55) return;
+
+    truckMaxSpeed = MAX_SPEED * (TRUCK_SPEED_RATIO + gameTime * TRUCK_CATCHUP_ACCEL);
+    truckMaxSpeed = Math.min(truckMaxSpeed, MAX_SPEED * 0.98);
+
+    const truckAccel = MAX_SPEED / 8;
+    if (truckSpeed < truckMaxSpeed) {
+        truckSpeed += truckAccel * dt;
+        if (truckSpeed > truckMaxSpeed) truckSpeed = truckMaxSpeed;
+    }
+    truckPosition += truckSpeed * dt;
+    if (truckPosition > trackLength) truckPosition = trackLength;
+
+    if (truckPosition >= 0) {
+        const truckSeg = findSegment(truckPosition);
+        truckX = interpolate(truckX, 0, 0.1);
+        truckX -= truckSeg.curve * 0.008;
+        truckX = clamp(truckX, -0.6, 0.6);
+    }
+
+    const dist = position - truckPosition;
+    if (dist >= 0 && dist < TRUCK_GAME_OVER_DIST * SEGMENT_LENGTH) {
+        gameOverReason = 'caught';
+        gameState = STATE.GAMEOVER;
+    }
+    if (truckPosition > position && position > SEGMENT_LENGTH * 10) {
+        gameOverReason = 'caught';
+        gameState = STATE.GAMEOVER;
+    }
+}
+
+// ===== SECTION 7: COLLISION SYSTEM =====
+let crashTimer = 0;
+let crashIntensity = 0;
+let stuckOnObstacle = false;
+
+function checkCollisions() {
+    const playerSegIdx = Math.floor(position / SEGMENT_LENGTH);
+    const playerW = 0.18;
+    let currentlyOverlapping = false;
+
+    for (let i = -1; i <= 2; i++) {
+        const checkIdx = playerSegIdx + i;
+        if (checkIdx < 0 || checkIdx >= segments.length) continue;
+        const seg = segments[checkIdx];
+        for (let j = 0; j < seg.sprites.length; j++) {
+            const sprite = seg.sprites[j];
+            if (sprite.source !== 'obstacle' && sprite.source !== 'barrier') continue;
+            const spriteW = sprite.width || 0.18;
+            if (overlap(playerX, playerW, sprite.offset, spriteW)) {
+                const segZ = seg.index * SEGMENT_LENGTH;
+                if (Math.abs(segZ - position) < SEGMENT_LENGTH * 1.5) {
+                    currentlyOverlapping = true;
+                    if (!stuckOnObstacle && speed > 0) {
+                        speed = 0;
+                        stuckOnObstacle = true;
+                        crashIntensity = 15;
+                        crashTimer = 0.3;
+                    }
+                }
+            }
+        }
+    }
+
+    if (stuckOnObstacle && !currentlyOverlapping) stuckOnObstacle = false;
+
+    if (Math.abs(playerX) > 1.1) {
+        gameOverReason = 'offroad';
+        gameState = STATE.GAMEOVER;
+    }
+}
+
+// ===== SECTION 8: HUD =====
+const elSpeed    = document.getElementById('speedometer');
+const elProgBar  = document.getElementById('progress-bar');
+const elProgPl   = document.getElementById('progress-player-icon');
+const elProgTr   = document.getElementById('progress-truck-icon');
+const elDist     = document.getElementById('truck-dist');
+const elCamMode  = document.getElementById('cam-mode');
+const elMirror   = document.getElementById('mirror-hud');
+const elDanger   = document.getElementById('danger-flash');
+const elOverlay  = document.getElementById('overlay');
+const elOvTitle  = document.getElementById('overlay-title');
+const elOvSub    = document.getElementById('overlay-sub');
+const elOvInfo   = document.getElementById('overlay-info');
+const elOvPrompt = document.getElementById('overlay-prompt');
+const elCdown    = document.getElementById('countdown-overlay');
+const elCdownNum = document.getElementById('countdown-num');
+const mirrorCanvas = document.getElementById('mirrorCanvas');
+const mCtx = mirrorCanvas.getContext('2d');
+
+function updateHUD() {
+    const kph = Math.round(speed / MAX_SPEED * 280);
+    elSpeed.textContent = `${kph} km/h`;
+    elSpeed.style.color = kph > 200 ? '#FF4444' : kph > 120 ? '#FFCC00' : '#00FF00';
+
+    const pct = clamp(position / trackLength, 0, 1);
+    elProgBar.style.width = (pct * 100) + '%';
+    elProgPl.style.left = (pct * 100) + '%';
+
+    const tPct = clamp(truckPosition / trackLength, 0, 1);
+    elProgTr.style.left = (Math.max(0, tPct) * 100) + '%';
+
+    const truckDist = Math.max(0, (position - truckPosition) / SEGMENT_LENGTH);
+    elDist.textContent = `大运: ${Math.round(truckDist)}m`;
+    elDist.style.color = truckDist > 40 ? '#00FF00' : truckDist > 20 ? '#FFCC00' : '#FF3333';
+
+    if (truckDist <= 20) {
+        const warn = document.createElement('div');
+        elDist.innerHTML = `大运: ${Math.round(truckDist)}m<br><span style="font-size:11px;color:#FF6666">危险!</span>`;
+    }
+
+    const modeText = cameraMode === VIEW.MIRROR ? '后视镜: 开启' : '后视镜: 关闭';
+    elCamMode.textContent = `${modeText} (C切换)`;
+
+    elMirror.style.display = cameraMode === VIEW.MIRROR ? 'block' : 'none';
+
+    // Danger flash
+    const now = Date.now();
+    elDanger.style.display = (truckDist < 12 && Math.floor(now / 250) % 2 === 0) ? 'block' : 'none';
+
+    // Crash shake
+    if (crashTimer > 0) {
+        camera.position.x += (Math.random() - 0.5) * crashIntensity * 3;
+        camera.position.y += (Math.random() - 0.5) * crashIntensity;
+        crashIntensity *= 0.9;
+    }
+}
+
+function drawRearMirror() {
+    const mW = 270, mH = 100;
+    mCtx.clearRect(0, 0, mW, mH);
+
+    const truckDist = Math.max(0.1, (position - truckPosition) / SEGMENT_LENGTH);
+    const zoomT = clamp(
+        (MIRROR_ZOOM_START_DIST - truckDist) / (MIRROR_ZOOM_START_DIST - MIRROR_ZOOM_END_DIST),
+        0, 1
+    );
+    const distFactor = Math.pow(zoomT, 0.75);
+
+    // Mirror glass background
+    const glassGrad = mCtx.createLinearGradient(0, 0, 0, mH);
+    glassGrad.addColorStop(0, '#1c2b3f');
+    glassGrad.addColorStop(1, '#0d1420');
+    mCtx.fillStyle = glassGrad;
+    mCtx.fillRect(0, 0, mW, mH);
+
+    // Road stripe hint
+    mCtx.strokeStyle = 'rgba(220,220,220,0.35)';
+    mCtx.lineWidth = 2;
+    mCtx.setLineDash([6, 6]);
+    mCtx.beginPath();
+    mCtx.moveTo(mW / 2, mH);
+    mCtx.lineTo(mW / 2, 8);
+    mCtx.stroke();
+    mCtx.setLineDash([]);
+
+    const tx = mW / 2;
+    const ty = mH - 8;
+
+    if (truckDist > MIRROR_ZOOM_START_DIST) {
+        const farT = clamp((truckDist - MIRROR_ZOOM_START_DIST) / 220, 0, 1);
+        const farY = 20 + farT * 16;
+        const farGap = 10 + farT * 6;
+        const farR = 1.8 + (1 - farT) * 2.2;
+        mCtx.fillStyle = 'rgba(255,245,120,0.85)';
+        mCtx.beginPath(); mCtx.arc(tx - farGap / 2, farY, farR, 0, Math.PI * 2); mCtx.fill();
+        mCtx.beginPath(); mCtx.arc(tx + farGap / 2, farY, farR, 0, Math.PI * 2); mCtx.fill();
+        mCtx.fillStyle = 'rgba(255,255,255,0.55)';
+        mCtx.font = '10px monospace';
+        mCtx.textAlign = 'center';
+        mCtx.textBaseline = 'top';
+        mCtx.fillText('远处追击中', tx, farY + 7);
+        return;
+    }
+
+    const tw = 40 + 210 * distFactor;
+    const th = 24 + 106 * distFactor;
+    const jitter = distFactor > 0.6 ? (Math.random() - 0.5) * 3 : 0;
+    const jtx = tx + jitter;
+
+    if (distFactor > 0.2) {
+        const glareA = 0.12 + distFactor * 0.28;
+        mCtx.fillStyle = `rgba(255,255,90,${glareA})`;
+        mCtx.beginPath();
+        mCtx.ellipse(jtx - tw * 0.25, ty - th * 0.22, tw * 0.16, th * 0.3, 0, 0, Math.PI * 2);
+        mCtx.fill();
+        mCtx.beginPath();
+        mCtx.ellipse(jtx + tw * 0.05, ty - th * 0.22, tw * 0.16, th * 0.3, 0, 0, Math.PI * 2);
+        mCtx.fill();
+    }
+
+    mCtx.fillStyle = '#0F4DB8';
+    mCtx.fillRect(jtx - tw / 2, ty - th, tw, th);
+    mCtx.fillStyle = '#0A397F';
+    mCtx.fillRect(jtx - tw / 2, ty - th, tw * 0.34, th * 0.72);
+    mCtx.fillStyle = '#0C428F';
+    mCtx.fillRect(jtx - tw / 2 + tw * 0.36, ty - th + th * 0.07, tw * 0.61, th * 0.83);
+
+    if (tw > 70) {
+        mCtx.fillStyle = '#FFFFFF';
+        mCtx.font = `bold ${Math.max(10, Math.floor(th * 0.28))}px sans-serif`;
+        mCtx.textAlign = 'center';
+        mCtx.textBaseline = 'middle';
+        mCtx.fillText('大运', jtx + tw * 0.12, ty - th * 0.45);
+    }
+
+    mCtx.fillStyle = '#FFF14D';
+    mCtx.fillRect(jtx - tw * 0.45, ty - th * 0.2, tw * 0.1, th * 0.1);
+    mCtx.fillRect(jtx - tw * 0.2, ty - th * 0.2, tw * 0.1, th * 0.1);
+
+    if (truckDist < 18) {
+        const pulse = 0.1 + 0.15 * (Math.sin(Date.now() / 120) * 0.5 + 0.5);
+        mCtx.fillStyle = `rgba(255,0,0,${pulse})`;
+        mCtx.fillRect(0, 0, mW, mH);
+    }
+}
+
+function showOverlay(title, sub, info, prompt) {
+    elOvTitle.textContent = title;
+    elOvSub.textContent = sub;
+    elOvInfo.textContent = info;
+    elOvPrompt.textContent = prompt;
+    elOverlay.classList.add('show');
+}
+function hideOverlay() { elOverlay.classList.remove('show'); }
+
+// ===== SECTION 9: GAME STATE MACHINE =====
+let gameState = STATE.MENU;
+let countdownTimer = 3.0;
+let gameOverReason = '';
+
+function resetGame() {
+    position = 0;
+    playerX = 0;
+    speed = 0;
+    truckPosition = -TRUCK_INITIAL_DISTANCE * SEGMENT_LENGTH;
+    truckSpeed = 0;
+    truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO;
+    truckX = 0;
+    gameTime = 0;
+    truckDelay = 0;
+    crashTimer = 0;
+    crashIntensity = 0;
+    stuckOnObstacle = false;
+    gameOverReason = '';
+    countdownTimer = 3.0;
+    keys.left = keys.right = keys.up = keys.down = false;
+    truckMesh.visible = false;
+}
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+        if (gameState === STATE.MENU) {
+            resetGame();
+            gameState = STATE.COUNTDOWN;
+            hideOverlay();
+            elCdown.classList.add('show');
+            e.preventDefault();
+        } else if (gameState === STATE.GAMEOVER || gameState === STATE.WIN) {
+            resetGame();
+            gameState = STATE.COUNTDOWN;
+            hideOverlay();
+            elCdown.classList.add('show');
+            e.preventDefault();
+        }
+    }
+});
+
+// ===== SECTION 10: 3D GAME LOOP =====
+let lastTimestamp = 0;
+const FIXED_DT = 1 / 60;
+let accumulator = 0;
+
+function gameLoop(timestamp) {
+    requestAnimationFrame(gameLoop);
+
+    const rawDt = (timestamp - lastTimestamp) / 1000;
+    const frameTime = Math.min(rawDt, 0.1);
+    lastTimestamp = timestamp;
+
+    switch (gameState) {
+        case STATE.MENU:
+            // Just render static scene
+            updateCamera();
+            renderer.render(scene, camera);
+            break;
+
+        case STATE.COUNTDOWN:
+            accumulator += frameTime;
+            while (accumulator >= FIXED_DT) {
+                countdownTimer -= FIXED_DT;
+                accumulator -= FIXED_DT;
+            }
+            updateScene3D();
+            updateCamera();
+
+            const num = Math.ceil(countdownTimer);
+            if (countdownTimer > 0) {
+                elCdownNum.textContent = num.toString();
+            } else {
+                elCdownNum.textContent = 'GO!';
+                elCdownNum.style.color = '#00FF00';
+            }
+
+            if (countdownTimer <= -0.6) {
+                gameState = STATE.PLAYING;
+                accumulator = 0;
+                elCdown.classList.remove('show');
+                elCdownNum.style.color = '#FFF';
+            }
+            renderer.render(scene, camera);
+            break;
+
+        case STATE.PLAYING:
+            accumulator += frameTime;
+            while (accumulator >= FIXED_DT) {
+                updatePlayer(FIXED_DT);
+                updateTruck(FIXED_DT);
+                checkCollisions();
+                if (crashTimer > 0) crashTimer -= FIXED_DT;
+                accumulator -= FIXED_DT;
+            }
+
+            // Win check
+            const finishIdx = segments.findIndex(s => s.isFinish);
+            if (finishIdx >= 0 && position >= finishIdx * SEGMENT_LENGTH) {
+                gameState = STATE.WIN;
+                const kphAvg = Math.round((trackLength / gameTime) / MAX_SPEED * 280);
+                showOverlay(
+                    '成功逃离!',
+                    'YOU WIN!',
+                    `通关用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
+                    '按 ENTER 再来一次'
+                );
+                elOvTitle.style.color = '#00FF00';
+            }
+
+            updateScene3D();
+            updateCamera();
+            updateHUD();
+            if (cameraMode === VIEW.MIRROR) drawRearMirror();
+            renderer.render(scene, camera);
+            break;
+
+        case STATE.GAMEOVER:
+            updateScene3D();
+            updateCamera();
+            renderer.render(scene, camera);
+            break;
+
+        case STATE.WIN:
+            updateScene3D();
+            updateCamera();
+            renderer.render(scene, camera);
+            break;
+    }
+}
+
+// ===== SECTION 11: INITIALIZATION =====
+function init() {
+    setupRenderer();
+    setupCamera();
+    buildTrack();
+    buildTrack3DPositions();
+    setupScene();
+    buildRoadMeshes();
+    buildSpriteMeshes();
+
+    // Show menu
+    showOverlay('逃离大运', 'ESCAPE FROM DAYUN', '↑/W 加速  ↓/S 刹车  ←/A →/D 转向  C 切换后视镜', '按 ENTER 或 SPACE 开始');
+    elOvTitle.style.color = '#FF3333';
+
+    // Setup gameover handler to show overlay
+    const origGameLoop = gameLoop;
+    let gameOverShown = false;
+    let winShown = false;
+
+    lastTimestamp = performance.now();
+    requestAnimationFrame(function loop(ts) {
+        requestAnimationFrame(loop);
+        const rawDt = (ts - lastTimestamp) / 1000;
+        const frameTime = Math.min(rawDt, 0.1);
+        lastTimestamp = ts;
+
+        if (gameState === STATE.GAMEOVER && !gameOverShown) {
+            gameOverShown = true;
+            const dist = Math.round(position / SEGMENT_LENGTH);
+            if (gameOverReason === 'offroad') {
+                showOverlay('冲出赛道了!', 'GAME OVER',
+                    `行驶距离: ${dist}m  |  用时: ${gameTime.toFixed(1)}s`,
+                    '按 ENTER 重新开始');
+                elOvTitle.style.color = '#FF6600';
+            } else {
+                showOverlay('被大运撞了!', 'GAME OVER',
+                    `行驶距离: ${dist}m  |  用时: ${gameTime.toFixed(1)}s`,
+                    '按 ENTER 重新开始');
+                elOvTitle.style.color = '#FF0000';
+            }
+        }
+        if (gameState !== STATE.GAMEOVER) gameOverShown = false;
+        if (gameState !== STATE.WIN) winShown = false;
+
+        switch (gameState) {
+            case STATE.MENU:
+                updateCamera();
+                renderer.render(scene, camera);
+                break;
+
+            case STATE.COUNTDOWN:
+                accumulator += frameTime;
+                while (accumulator >= FIXED_DT) {
+                    countdownTimer -= FIXED_DT;
+                    accumulator -= FIXED_DT;
+                }
+                updateScene3D();
+                updateCamera();
+                const n = Math.ceil(countdownTimer);
+                if (countdownTimer > 0) {
+                    elCdownNum.textContent = n.toString();
+                    elCdownNum.style.color = '#FFFFFF';
+                } else {
+                    elCdownNum.textContent = 'GO!';
+                    elCdownNum.style.color = '#00FF00';
+                }
+                if (countdownTimer <= -0.6) {
+                    gameState = STATE.PLAYING;
+                    accumulator = 0;
+                    elCdown.classList.remove('show');
+                }
+                renderer.render(scene, camera);
+                break;
+
+            case STATE.PLAYING:
+                accumulator += frameTime;
+                while (accumulator >= FIXED_DT) {
+                    updatePlayer(FIXED_DT);
+                    updateTruck(FIXED_DT);
+                    checkCollisions();
+                    if (crashTimer > 0) crashTimer -= FIXED_DT;
+                    accumulator -= FIXED_DT;
+                }
+
+                const fi = segments.findIndex(s => s.isFinish);
+                if (fi >= 0 && position >= fi * SEGMENT_LENGTH && !winShown) {
+                    gameState = STATE.WIN;
+                    winShown = true;
+                    const kphAvg = Math.round((trackLength / gameTime) / MAX_SPEED * 280);
+                    showOverlay('成功逃离!', 'YOU WIN!',
+                        `通关用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
+                        '按 ENTER 再来一次');
+                    elOvTitle.style.color = '#00FF00';
+                }
+
+                updateScene3D();
+                updateCamera();
+                updateHUD();
+                if (cameraMode === VIEW.MIRROR) drawRearMirror();
+                renderer.render(scene, camera);
+                break;
+
+            case STATE.GAMEOVER:
+            case STATE.WIN:
+                updateScene3D();
+                updateCamera();
+                renderer.render(scene, camera);
+                break;
+        }
+    });
+}
+
+window.addEventListener('load', init);
+</script>
+</body>
+</html>
