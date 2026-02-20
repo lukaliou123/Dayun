@@ -178,7 +178,8 @@ const OFF_ROAD_LIMIT = MAX_SPEED / 4;
 const CENTRIFUGAL_FORCE = 0.3;
 
 const TRUCK_INITIAL_DISTANCE = 40;
-const TRUCK_SPEED_RATIO = 0.75;
+const TRUCK_SPEED_RATIO = 0.9;       // 第一关：比玩家稍慢，靠初始距离近制造压力
+const TRUCK_SPEED_RATIO_L2 = 1.15;  // 第二关：比玩家略快，稳定追近不超圈
 const TRUCK_CATCHUP_ACCEL = 0.003;
 const TRUCK_GAME_OVER_DIST = 3;
 const MIRROR_ZOOM_START_DIST = 320;
@@ -200,7 +201,7 @@ const COLORS = {
 };
 
 const CURVE = { NONE: 0, EASY: 2, MEDIUM: 4, HARD: 6, SHARP: 10 };
-const STATE = { MENU: 'menu', COUNTDOWN: 'countdown', PLAYING: 'playing', GAMEOVER: 'gameover', WIN: 'win' };
+const STATE = { MENU: 'menu', COUNTDOWN: 'countdown', PLAYING: 'playing', GAMEOVER: 'gameover', WIN: 'win', LEVEL_CLEAR: 'levelclear' };
 const VIEW = { PLAYER: 'player', MIRROR: 'mirror' };
 
 // ===== SECTION 2: UTILITY FUNCTIONS =====
@@ -291,6 +292,36 @@ function buildTrack() {
         if (i % 13 === 0) segments[i].sprites.push({ source: 'tree', offset: 1.8 });
         if (i % 17 === 0) segments[i].sprites.push({ source: 'tree', offset: -2.0 });
         if (i % 21 === 0) segments[i].sprites.push({ source: 'tree', offset: 2.2 });
+    }
+
+    trackLength = segments.length * SEGMENT_LENGTH;
+}
+
+function buildTrack2() {
+    segments = [];
+    // 圆形赛道：600段，curve=1.75，绕一整圈（600*1.75*0.006≈6.3≈2π），圆更大
+    addCurve(600, 1.75, 30, 30);
+
+    // 障碍物：每18段放一个，偏向路的一侧，保证另一侧有足够通道
+    for (let i = 15; i < segments.length - 15; i += 18) {
+        const r = Math.random();
+        const side = Math.random() < 0.5 ? -1 : 1;
+        // offset 固定在 0.35~0.65 之间，偏边不占中心，留出对面通道
+        const offset = side * (0.35 + Math.random() * 0.3);
+        if (r < 0.55) {
+            segments[i].sprites.push({ source: 'obstacle', offset: offset, width: 0.18 });
+        } else {
+            // 倒树 width 0.22，只挡约半条路，对面可以绕过
+            segments[i].sprites.push({ source: 'fallenTree', offset: offset, width: 0.22 });
+        }
+    }
+
+    // 终点：最后几段标记为FINISH（跑满一圈）
+    for (let i = segments.length - 12; i < segments.length - 2; i++) {
+        if (segments[i]) {
+            segments[i].color = COLORS.FINISH;
+            segments[i].isFinish = true;
+        }
     }
 
     trackLength = segments.length * SEGMENT_LENGTH;
@@ -614,6 +645,26 @@ function createTreeMesh() {
     return g;
 }
 
+function createFallenTreeMesh() {
+    const g = new THREE.Group();
+    // 树干横放（沿道路横向，rotation.z = Math.PI/2）
+    const trunk = new THREE.Mesh(
+        new THREE.CylinderGeometry(55, 75, 1400, 8),
+        new THREE.MeshLambertMaterial({ color: 0x4A2F00 })
+    );
+    trunk.rotation.z = Math.PI / 2;
+    trunk.position.y = 75;
+    g.add(trunk);
+    // 树冠放在一端
+    const crown = new THREE.Mesh(
+        new THREE.SphereGeometry(300, 8, 6),
+        new THREE.MeshLambertMaterial({ color: 0x005108 })
+    );
+    crown.position.set(700, 120, 0);
+    g.add(crown);
+    return g;
+}
+
 // Build all sprite meshes from track data
 function buildSpriteMeshes() {
     spriteMeshes.forEach(s => scene.remove(s.mesh));
@@ -632,6 +683,8 @@ function buildSpriteMeshes() {
                 mesh = createObstacleMesh();
             } else if (sprite.source === 'barrier') {
                 mesh = createBarrierMesh();
+            } else if (sprite.source === 'fallenTree') {
+                mesh = createFallenTreeMesh();
             } else {
                 return;
             }
@@ -741,6 +794,7 @@ let playerX = 0;
 let speed = 0;
 let position = 0;
 let cameraMode = VIEW.PLAYER;
+let currentLevel = 1;
 
 const keys = { left: false, right: false, up: false, down: false };
 
@@ -798,23 +852,17 @@ function updatePlayer(dt) {
 // ===== SECTION 6: DAYUN TRUCK AI =====
 let truckPosition = 0;
 let truckSpeed = 0;
-let truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO;
+let truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO; // 初始值，startLevel会覆盖
 let truckX = 0;
 let gameTime = 0;
 let truckDelay = 1.0;
 
 function updateTruck(dt) {
     gameTime += dt;
-    if (position / trackLength < 0.55) return;
+    if (gameTime < 3.0) return;
 
-    truckMaxSpeed = MAX_SPEED * (TRUCK_SPEED_RATIO + gameTime * TRUCK_CATCHUP_ACCEL);
-    truckMaxSpeed = Math.min(truckMaxSpeed, MAX_SPEED * 0.98);
-
-    const truckAccel = MAX_SPEED / 8;
-    if (truckSpeed < truckMaxSpeed) {
-        truckSpeed += truckAccel * dt;
-        if (truckSpeed > truckMaxSpeed) truckSpeed = truckMaxSpeed;
-    }
+    // 固定速度，不加速不减速
+    truckSpeed = truckMaxSpeed;
     truckPosition += truckSpeed * dt;
     if (truckPosition > trackLength) truckPosition = trackLength;
 
@@ -852,7 +900,7 @@ function checkCollisions() {
         const seg = segments[checkIdx];
         for (let j = 0; j < seg.sprites.length; j++) {
             const sprite = seg.sprites[j];
-            if (sprite.source !== 'obstacle' && sprite.source !== 'barrier') continue;
+            if (sprite.source !== 'obstacle' && sprite.source !== 'barrier' && sprite.source !== 'fallenTree') continue;
             const spriteW = sprite.width || 0.18;
             if (overlap(playerX, playerW, sprite.offset, spriteW)) {
                 const segZ = seg.index * SEGMENT_LENGTH;
@@ -882,6 +930,7 @@ const elSpeed    = document.getElementById('speedometer');
 const elProgBar  = document.getElementById('progress-bar');
 const elProgPl   = document.getElementById('progress-player-icon');
 const elProgTr   = document.getElementById('progress-truck-icon');
+const elProgLabel = document.getElementById('progress-label');
 const elDist     = document.getElementById('truck-dist');
 const elCamMode  = document.getElementById('cam-mode');
 const elMirror   = document.getElementById('mirror-hud');
@@ -904,6 +953,7 @@ function updateHUD() {
     const pct = clamp(position / trackLength, 0, 1);
     elProgBar.style.width = (pct * 100) + '%';
     elProgPl.style.left = (pct * 100) + '%';
+    elProgLabel.textContent = currentLevel === 1 ? '第一关 终点' : '第二关 终点（一圈）';
 
     const tPct = clamp(truckPosition / trackLength, 0, 1);
     elProgTr.style.left = (Math.max(0, tPct) * 100) + '%';
@@ -1037,13 +1087,12 @@ let gameState = STATE.MENU;
 let countdownTimer = 3.0;
 let gameOverReason = '';
 
-function resetGame() {
+function startLevel(level) {
+    currentLevel = level;
     position = 0;
     playerX = 0;
     speed = 0;
-    truckPosition = -TRUCK_INITIAL_DISTANCE * SEGMENT_LENGTH;
     truckSpeed = 0;
-    truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO;
     truckX = 0;
     gameTime = 0;
     truckDelay = 0;
@@ -1054,6 +1103,23 @@ function resetGame() {
     countdownTimer = 3.0;
     keys.left = keys.right = keys.up = keys.down = false;
     truckMesh.visible = false;
+
+    if (level === 1) {
+        buildTrack();
+        truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO;
+    } else {
+        buildTrack2();
+        truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO_L2;
+    }
+    truckPosition = -TRUCK_INITIAL_DISTANCE * SEGMENT_LENGTH;
+
+    buildTrack3DPositions();
+    buildRoadMeshes();
+    buildSpriteMeshes();
+}
+
+function resetGame() {
+    startLevel(1);
 }
 
 document.addEventListener('keydown', (e) => {
@@ -1064,8 +1130,14 @@ document.addEventListener('keydown', (e) => {
             hideOverlay();
             elCdown.classList.add('show');
             e.preventDefault();
+        } else if (gameState === STATE.LEVEL_CLEAR) {
+            startLevel(2);
+            gameState = STATE.COUNTDOWN;
+            hideOverlay();
+            elCdown.classList.add('show');
+            e.preventDefault();
         } else if (gameState === STATE.GAMEOVER || gameState === STATE.WIN) {
-            resetGame();
+            startLevel(1);
             gameState = STATE.COUNTDOWN;
             hideOverlay();
             elCdown.classList.add('show');
@@ -1132,15 +1204,20 @@ function gameLoop(timestamp) {
             // Win check
             const finishIdx = segments.findIndex(s => s.isFinish);
             if (finishIdx >= 0 && position >= finishIdx * SEGMENT_LENGTH) {
-                gameState = STATE.WIN;
                 const kphAvg = Math.round((trackLength / gameTime) / MAX_SPEED * 280);
-                showOverlay(
-                    '成功逃离!',
-                    'YOU WIN!',
-                    `通关用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
-                    '按 ENTER 再来一次'
-                );
-                elOvTitle.style.color = '#00FF00';
+                if (currentLevel === 1) {
+                    gameState = STATE.LEVEL_CLEAR;
+                    showOverlay('第一关通关！', 'STAGE 1 CLEAR',
+                        `用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
+                        '按 ENTER 进入第二关');
+                    elOvTitle.style.color = '#FFCC00';
+                } else {
+                    gameState = STATE.WIN;
+                    showOverlay('成功逃离!', 'YOU WIN!',
+                        `通关用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
+                        '按 ENTER 再来一次');
+                    elOvTitle.style.color = '#00FF00';
+                }
             }
 
             updateScene3D();
@@ -1206,7 +1283,7 @@ function init() {
             }
         }
         if (gameState !== STATE.GAMEOVER) gameOverShown = false;
-        if (gameState !== STATE.WIN) winShown = false;
+        if (gameState !== STATE.WIN && gameState !== STATE.LEVEL_CLEAR) winShown = false;
 
         switch (gameState) {
             case STATE.MENU:
@@ -1250,13 +1327,21 @@ function init() {
 
                 const fi = segments.findIndex(s => s.isFinish);
                 if (fi >= 0 && position >= fi * SEGMENT_LENGTH && !winShown) {
-                    gameState = STATE.WIN;
                     winShown = true;
                     const kphAvg = Math.round((trackLength / gameTime) / MAX_SPEED * 280);
-                    showOverlay('成功逃离!', 'YOU WIN!',
-                        `通关用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
-                        '按 ENTER 再来一次');
-                    elOvTitle.style.color = '#00FF00';
+                    if (currentLevel === 1) {
+                        gameState = STATE.LEVEL_CLEAR;
+                        showOverlay('第一关通关！', 'STAGE 1 CLEAR',
+                            `用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
+                            '按 ENTER 进入第二关');
+                        elOvTitle.style.color = '#FFCC00';
+                    } else {
+                        gameState = STATE.WIN;
+                        showOverlay('成功逃离!', 'YOU WIN!',
+                            `通关用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
+                            '按 ENTER 再来一次');
+                        elOvTitle.style.color = '#00FF00';
+                    }
                 }
 
                 updateScene3D();
@@ -1268,6 +1353,7 @@ function init() {
 
             case STATE.GAMEOVER:
             case STATE.WIN:
+            case STATE.LEVEL_CLEAR:
                 updateScene3D();
                 updateCamera();
                 renderer.render(scene, camera);
