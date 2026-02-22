@@ -86,6 +86,31 @@
             animation: blink 1s step-start infinite;
         }
         @keyframes blink { 50% { opacity: 0; } }
+        #level-select {
+            display: none;
+            margin-top: 18px;
+            gap: 12px;
+            flex-direction: row;
+        }
+        #level-select.show { display: flex; }
+        .level-btn {
+            padding: 10px 22px;
+            font-size: 16px; font-weight: bold;
+            font-family: monospace;
+            border: 2px solid #555;
+            border-radius: 6px;
+            background: rgba(255,255,255,0.08);
+            color: #DDD;
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s, color 0.15s;
+        }
+        .level-btn:hover { background: rgba(255,255,255,0.22); border-color: #FFF; color: #FFF; }
+        .level-btn.lv1 { border-color: #FFCC00; color: #FFCC00; }
+        .level-btn.lv1:hover { background: rgba(255,204,0,0.18); }
+        .level-btn.lv2 { border-color: #FF8800; color: #FF8800; }
+        .level-btn.lv2:hover { background: rgba(255,136,0,0.18); }
+        .level-btn.lv3 { border-color: #00FF88; color: #00FF88; }
+        .level-btn.lv3:hover { background: rgba(0,255,136,0.18); }
         #countdown-overlay {
             display: none;
             position: absolute; top: 0; left: 0;
@@ -142,6 +167,11 @@
     <div id="overlay-sub">ESCAPE FROM DAYUN</div>
     <div id="overlay-info"></div>
     <div id="overlay-prompt">按 ENTER 或 SPACE 开始</div>
+    <div id="level-select">
+        <button class="level-btn lv1" id="btn-lv1">第一关</button>
+        <button class="level-btn lv2" id="btn-lv2">第二关</button>
+        <button class="level-btn lv3" id="btn-lv3">第三关</button>
+    </div>
 </div>
 
 <!-- Countdown overlay -->
@@ -180,6 +210,7 @@ const CENTRIFUGAL_FORCE = 0.3;
 const TRUCK_INITIAL_DISTANCE = 40;
 const TRUCK_SPEED_RATIO = 0.9;       // 第一关：比玩家稍慢，靠初始距离近制造压力
 const TRUCK_SPEED_RATIO_L2 = 1.15;  // 第二关：比玩家略快，稳定追近不超圈
+const TRUCK_SPEED_RATIO_L3 = 1.25;  // 第三关：更快
 const TRUCK_CATCHUP_ACCEL = 0.003;
 const TRUCK_GAME_OVER_DIST = 3;
 const MIRROR_ZOOM_START_DIST = 320;
@@ -201,7 +232,7 @@ const COLORS = {
 };
 
 const CURVE = { NONE: 0, EASY: 2, MEDIUM: 4, HARD: 6, SHARP: 10 };
-const STATE = { MENU: 'menu', COUNTDOWN: 'countdown', PLAYING: 'playing', GAMEOVER: 'gameover', WIN: 'win', LEVEL_CLEAR: 'levelclear' };
+const STATE = { MENU: 'menu', COUNTDOWN: 'countdown', PLAYING: 'playing', GAMEOVER: 'gameover', WIN: 'win', LEVEL_CLEAR: 'levelclear', LEVEL2_CLEAR: 'level2clear' };
 const VIEW = { PLAYER: 'player', MIRROR: 'mirror' };
 
 // ===== SECTION 2: UTILITY FUNCTIONS =====
@@ -218,34 +249,48 @@ function overlap(x1, w1, x2, w2) {
 let segments = [];
 let trackLength = 0;
 
-function addSegment(curve) {
+function addSegment(curve, elevation) {
     const n = segments.length;
     const isLight = Math.floor(n / RUMBLE_LENGTH) % 2 === 0;
     segments.push({
         index: n,
         curve: curve,
+        elevation: elevation || 0,  // Y offset for this segment (Level 3 height)
         color: isLight ? COLORS.LIGHT : COLORS.DARK,
         sprites: [],
         isFinish: false,
-        world3d: { x: 0, z: 0, angle: 0 }
+        world3d: { x: 0, y: 0, z: 0, angle: 0 }
     });
 }
 
-function addStraight(num) {
-    for (let i = 0; i < num; i++) addSegment(CURVE.NONE);
+function addStraight(num, elevation) {
+    for (let i = 0; i < num; i++) addSegment(CURVE.NONE, elevation || 0);
 }
 
-function addCurve(num, curve, easeIn, easeOut) {
+function addStraightSlope(num, elevStart, elevEnd) {
+    for (let i = 0; i < num; i++) {
+        addSegment(CURVE.NONE, elevStart + (elevEnd - elevStart) * (i / num));
+    }
+}
+
+function addCurve(num, curve, easeIn, easeOut, elevation) {
     easeIn = easeIn || 0;
     easeOut = easeOut || 0;
+    elevation = elevation || 0;
     const mid = num - easeIn - easeOut;
-    for (let i = 0; i < easeIn; i++) addSegment(interpolate(0, curve, i / easeIn));
-    for (let i = 0; i < mid; i++) addSegment(curve);
-    for (let i = 0; i < easeOut; i++) addSegment(interpolate(curve, 0, i / easeOut));
+    for (let i = 0; i < easeIn; i++) addSegment(interpolate(0, curve, i / easeIn), elevation);
+    for (let i = 0; i < mid; i++) addSegment(curve, elevation);
+    for (let i = 0; i < easeOut; i++) addSegment(interpolate(curve, 0, i / easeOut), elevation);
 }
 
-function addSharpTurn(dir) {
-    addCurve(40, CURVE.SHARP * dir, 8, 8);
+function addSharpTurn(dir, elevation) {
+    addCurve(40, CURVE.SHARP * dir, 8, 8, elevation || 0);
+}
+
+// 180-degree turn: SHARP curve * dir, enough segments to total ~π radians
+// Each segment at curve=10 adds 10*0.006=0.06 rad; π/0.06 ≈ 52 segs
+function add180Turn(dir, elevation) {
+    addCurve(60, CURVE.SHARP * dir, 10, 10, elevation || 0);
 }
 
 function buildTrack() {
@@ -327,6 +372,99 @@ function buildTrack2() {
     trackLength = segments.length * SEGMENT_LENGTH;
 }
 
+function buildTrack3() {
+    segments = [];
+    const HIGH_ELEV = 3200;   // 第一段高台高度（Three.js Y 单位）
+
+    // === 第一段：高台直道（高处出发）===
+    addStraight(25, HIGH_ELEV);   // 高台起步直道
+
+    // 第一个180度急弯（高台上）
+    add180Turn(1, HIGH_ELEV);
+
+    // 高台后段直道 + 障碍物区
+    const obsHighStart = segments.length;
+    addStraight(45, HIGH_ELEV);
+    // 障碍物：交错摆放，留有通道（左右交替，保证对侧可以绕过）
+    for (let i = 5; i < 40; i += 9) {
+        const side = (i % 18 < 9) ? -1 : 1;
+        const offset = side * (0.32 + Math.random() * 0.2);
+        if (Math.random() < 0.5) {
+            segments[obsHighStart + i].sprites.push({ source: 'obstacle', offset, width: 0.18 });
+        } else {
+            segments[obsHighStart + i].sprites.push({ source: 'fallenTree', offset, width: 0.20 });
+        }
+    }
+
+    // 坡道预警区：提示玩家即将飞跃
+    addStraight(6, HIGH_ELEV);
+
+    // === 坡道：从高台飞跃而下 ===
+    // 在坡道的前2段放箱子，增加飞跃难度（要绕过障碍再飞出去）
+    const rampStart = segments.length;
+    // 坡道最开始放两个箱子（一左一右，中间有缝隙可以穿过）
+    addStraight(1, HIGH_ELEV);
+    if (segments[rampStart]) {
+        segments[rampStart].sprites.push({ source: 'obstacle', offset: -0.55, width: 0.18 });
+        segments[rampStart].sprites.push({ source: 'obstacle', offset:  0.55, width: 0.18 });
+    }
+
+    // 主坡道（急剧下降，触发飞跃）
+    const actualRampStart = segments.length;
+    addStraightSlope(10, HIGH_ELEV, 0);  // 急速下坡
+    // 在坡道上也放横树（阻挡路面，但玩家飞起来后会跳过去）
+    for (let i = 2; i < 8; i += 3) {
+        if (segments[actualRampStart + i]) {
+            const side = i % 6 < 3 ? -0.4 : 0.4;
+            segments[actualRampStart + i].sprites.push({ source: 'fallenTree', offset: side, width: 0.20 });
+        }
+    }
+    // 标记坡道段（触发飞跃物理）
+    for (let i = rampStart; i < rampStart + 11; i++) {
+        if (segments[i]) segments[i].isRamp = true;
+    }
+
+    // === 第二段：低处直道（落地区）===
+    addStraight(18, 0);   // 落地缓冲（无障碍，让玩家稳定落地）
+
+    // 第二个180度急弯（低处）
+    add180Turn(-1, 0);
+
+    // 低处障碍直道（密集障碍，压迫感更强）
+    const obsLowStart = segments.length;
+    addStraight(55, 0);
+    for (let i = 5; i < 50; i += 9) {
+        const side = (i % 18 < 9) ? -1 : 1;
+        const offset = side * (0.38 + Math.random() * 0.18);
+        if (Math.random() < 0.55) {
+            segments[obsLowStart + i].sprites.push({ source: 'fallenTree', offset, width: 0.22 });
+        } else {
+            segments[obsLowStart + i].sprites.push({ source: 'obstacle', offset, width: 0.18 });
+        }
+    }
+
+    // 冲刺直道（干净，全速冲线）
+    addStraight(28, 0);
+
+    // 终点线：最后几段
+    for (let i = segments.length - 12; i < segments.length - 2; i++) {
+        if (segments[i]) {
+            segments[i].color = COLORS.FINISH;
+            segments[i].isFinish = true;
+        }
+    }
+
+    // 路边树木（只在低处段添加，高台感觉更荒凉）
+    for (let i = 0; i < segments.length; i++) {
+        if ((segments[i].elevation || 0) < HIGH_ELEV * 0.4) {
+            if (i % 11 === 0) segments[i].sprites.push({ source: 'tree', offset: -1.65 });
+            if (i % 14 === 0) segments[i].sprites.push({ source: 'tree', offset:  1.85 });
+        }
+    }
+
+    trackLength = segments.length * SEGMENT_LENGTH;
+}
+
 function findSegment(z) {
     const idx = Math.floor(z / SEGMENT_LENGTH) % segments.length;
     return segments[idx < 0 ? 0 : idx];
@@ -336,7 +474,9 @@ function findSegment(z) {
 function buildTrack3DPositions() {
     let wx = 0, wz = 0, angle = 0;
     for (let i = 0; i < segments.length; i++) {
-        segments[i].world3d = { x: wx, z: wz, angle: angle };
+        // Y = elevation stored directly on segment
+        const wy = segments[i].elevation || 0;
+        segments[i].world3d = { x: wx, y: wy, z: wz, angle: angle };
         wz -= Math.cos(angle) * SEGMENT_LENGTH;
         wx += Math.sin(angle) * SEGMENT_LENGTH;
         angle += segments[i].curve * CURVE_TO_ANGLE;
@@ -349,8 +489,9 @@ function gameToWorld(pos, lateralX) {
     const seg = segments[segIdx];
     const a = seg.world3d.angle;
     const px = seg.world3d.x + Math.cos(a) * lateralX * ROAD_WIDTH / 2;
+    const py = seg.world3d.y || 0;
     const pz = seg.world3d.z + Math.sin(a) * lateralX * ROAD_WIDTH / 2;
-    return new THREE.Vector3(px, 0, pz);
+    return new THREE.Vector3(px, py, pz);
 }
 
 // ===== SECTION 4: THREE.JS SCENE SETUP =====
@@ -432,6 +573,7 @@ function buildRoadMeshes() {
             matRoad = matRoadLight; matRumble = matRumbleLight; matGrass = matGrassLight;
         }
 
+        const avgY = ((w3.y || 0) + (n3.y || 0)) / 2;
         function makeFlat(w, l, mat, offsetX = 0) {
             const geo = new THREE.PlaneGeometry(w, l);
             const mesh = new THREE.Mesh(geo, mat);
@@ -439,16 +581,32 @@ function buildRoadMeshes() {
             mesh.rotation.z = -avgAngle;
             const perpX = Math.cos(avgAngle) * offsetX;
             const perpZ = Math.sin(avgAngle) * offsetX;
-            mesh.position.set(cx + perpX, 0, cz + perpZ);
+            mesh.position.set(cx + perpX, avgY, cz + perpZ);
             mesh.receiveShadow = false;
             scene.add(mesh);
             roadMeshes.push(mesh);
             return mesh;
         }
 
-        // Grass (left + right)
-        makeFlat(grassW, segLen * 1.02, matGrass, -grassW * 0.4);
-        makeFlat(grassW, segLen * 1.02, matGrass,  grassW * 0.4);
+        // Elevated platform supports (Level 3 high sections)
+        if (avgY > 500) {
+            const pillarMat = new THREE.MeshLambertMaterial({ color: 0x888888 });
+            const pillarGeo = new THREE.BoxGeometry(180, avgY, 180);
+            [-roadW * 0.55, roadW * 0.55].forEach(pOff => {
+                const pillar = new THREE.Mesh(pillarGeo, pillarMat);
+                const ppx = cx + Math.cos(avgAngle) * pOff;
+                const ppz = cz + Math.sin(avgAngle) * pOff;
+                pillar.position.set(ppx, avgY / 2, ppz);
+                scene.add(pillar);
+                roadMeshes.push(pillar);
+            });
+        }
+
+        // Grass (left + right) - only draw at ground level
+        if (avgY < 200) {
+            makeFlat(grassW, segLen * 1.02, matGrass, -grassW * 0.4);
+            makeFlat(grassW, segLen * 1.02, matGrass,  grassW * 0.4);
+        }
 
         // Road surface
         makeFlat(roadW, segLen * 1.02, matRoad);
@@ -689,11 +847,12 @@ function buildSpriteMeshes() {
                 return;
             }
 
-            // Position: perpendicular offset from road center
+            // Position: perpendicular offset from road center, at segment elevation
             const lateralX = sprite.offset; // in normalized coords (-1=left edge)
             const wx = w3.x + Math.cos(a) * lateralX * ROAD_WIDTH / 2;
+            const wy = w3.y || 0;
             const wz = w3.z + Math.sin(a) * lateralX * ROAD_WIDTH / 2;
-            mesh.position.set(wx, 0, wz);
+            mesh.position.set(wx, wy, wz);
             mesh.rotation.y = -a;
             scene.add(mesh);
             spriteMeshes.push({ mesh, segIdx: i, offset: sprite.offset });
@@ -747,19 +906,21 @@ function updateCamera() {
     const segIdx = clamp(Math.floor(position / SEGMENT_LENGTH), 0, segments.length - 1);
     const seg = segments[segIdx];
     const angle = seg.world3d.angle;
+    const segElevY = seg.world3d.y || 0;
 
-    // Camera behind the player
+    // 相机跟随：Y轴需要反映当前高度+空中高度
+    const playerWorldY = segElevY + (playerAirborne ? playerAirY : 0);
     camera.position.x = playerPos3.x - Math.sin(angle) * CAM_FOLLOW_DIST;
-    camera.position.y = CAM_HEIGHT_3D;
+    camera.position.y = playerWorldY + CAM_HEIGHT_3D;
     camera.position.z = playerPos3.z + Math.cos(angle) * CAM_FOLLOW_DIST;
 
-    // Look toward the road ahead
+    // 看向前方道路
     const aheadIdx = clamp(
         Math.floor((position + CAM_LOOK_AHEAD) / SEGMENT_LENGTH),
         0, segments.length - 1
     );
     const aheadSeg = segments[aheadIdx];
-    camera.lookAt(aheadSeg.world3d.x, 0, aheadSeg.world3d.z);
+    camera.lookAt(aheadSeg.world3d.x, aheadSeg.world3d.y || 0, aheadSeg.world3d.z);
 }
 
 function updateScene3D() {
@@ -767,22 +928,33 @@ function updateScene3D() {
     const pp = gameToWorld(position, playerX);
     const pSegIdx = clamp(Math.floor(position / SEGMENT_LENGTH), 0, segments.length - 1);
     const pSeg = segments[pSegIdx];
-    playerCarMesh.position.set(pp.x, 130, pp.z);
-    playerCarMesh.rotation.y = -pSeg.world3d.angle + Math.PI;
+    const baseY = pp.y;  // segment elevation
 
-    // Tilt on steering
-    let tilt = 0;
-    if (keys.left && speed > 0) tilt = 0.06;
-    if (keys.right && speed > 0) tilt = -0.06;
-    playerCarMesh.rotation.z = tilt;
+    if (playerAirborne) {
+        // 空中：加上翻转和飞行高度
+        playerCarMesh.position.set(pp.x, baseY + playerAirY + 130, pp.z);
+        playerCarMesh.rotation.y = -pSeg.world3d.angle + Math.PI;
+        playerCarMesh.rotation.x = playerTumbleX;
+        playerCarMesh.rotation.z = playerTumbleZ;
+    } else {
+        playerCarMesh.position.set(pp.x, baseY + 130, pp.z);
+        playerCarMesh.rotation.y = -pSeg.world3d.angle + Math.PI;
+        // 转向侧倾（只在地面时）
+        let tilt = 0;
+        if (keys.left && speed > 0) tilt = 0.06;
+        if (keys.right && speed > 0) tilt = -0.06;
+        playerCarMesh.rotation.z = tilt;
+        playerCarMesh.rotation.x = 0;
+    }
 
     // Truck
     if (truckPosition >= 0) {
         const tp = gameToWorld(truckPosition, truckX);
         const tSegIdx = clamp(Math.floor(truckPosition / SEGMENT_LENGTH), 0, segments.length - 1);
         const tSeg = segments[tSegIdx];
+        const tBaseY = tp.y;
         truckMesh.visible = true;
-        truckMesh.position.set(tp.x, 240, tp.z);
+        truckMesh.position.set(tp.x, tBaseY + 240, tp.z);
         truckMesh.rotation.y = -tSeg.world3d.angle + Math.PI;
     } else {
         truckMesh.visible = false;
@@ -795,6 +967,17 @@ let speed = 0;
 let position = 0;
 let cameraMode = VIEW.PLAYER;
 let currentLevel = 1;
+
+// Jump/tumble physics (Level 3)
+let playerAirborne = false;       // 是否在空中
+let playerAirY = 0;               // 空中Y位置（相对于地面）
+let playerAirVY = 0;              // 垂直速度
+let playerTumbleX = 0;            // X轴翻转角度（前翻/后翻）
+let playerTumbleZ = 0;            // Z轴翻转角度（侧翻）
+let playerTumbleVX = 0;           // X轴翻转速度
+let playerTumbleVZ = 0;           // Z轴翻转速度
+const GRAVITY = 18000;            // 重力加速度（每秒²）
+const JUMP_VELOCITY = 7000;       // 起跳初速度（从坡道飞出时）
 
 const keys = { left: false, right: false, up: false, down: false };
 
@@ -822,29 +1005,80 @@ function updatePlayer(dt) {
     const playerSeg = findSegment(position);
     const speedPercent = speed / MAX_SPEED;
 
-    if (stuckOnObstacle) {
-        speed = 0;
-    } else if (keys.up) {
-        speed += ACCEL * dt;
-    } else if (keys.down) {
-        speed += BRAKE_DECEL * dt;
+    if (playerAirborne) {
+        // 空中物理：应用重力，无法控制转向加速
+        playerAirVY -= GRAVITY * dt;
+        playerAirY += playerAirVY * dt;
+
+        // 翻滚角速度持续旋转
+        playerTumbleX += playerTumbleVX * dt;
+        playerTumbleZ += playerTumbleVZ * dt;
+        // 轻微空气阻力减慢翻滚
+        playerTumbleVX *= 0.995;
+        playerTumbleVZ *= 0.995;
+
+        // 仍可水平移动（但操控变弱）
+        const airSteer = 1.2 * dt;
+        if (keys.left)  playerX -= airSteer;
+        if (keys.right) playerX += airSteer;
+
+        // 落地检测：落到地面高度（当前段的elevation）
+        const groundY = playerSeg.elevation || 0;
+        if (playerAirY <= 0) {
+            // 落地！
+            playerAirY = 0;
+            playerAirborne = false;
+            playerTumbleVX = 0;
+            playerTumbleVZ = 0;
+            // 落地冲击：根据垂直速度决定减速
+            const impactFactor = Math.abs(playerAirVY) / JUMP_VELOCITY;
+            speed *= Math.max(0.05, 1.0 - impactFactor * 0.9);
+            playerAirVY = 0;
+            // 落地震动效果
+            crashIntensity = 25;
+            crashTimer = 0.5;
+        }
+        position += speed * 0.6 * dt;  // 空中略微减速前进
     } else {
-        speed += NATURAL_DECEL * dt;
+        // 正常地面驾驶
+        if (stuckOnObstacle) {
+            speed = 0;
+        } else if (keys.up) {
+            speed += ACCEL * dt;
+        } else if (keys.down) {
+            speed += BRAKE_DECEL * dt;
+        } else {
+            speed += NATURAL_DECEL * dt;
+        }
+
+        const steerSpeed = 3.0;
+        const steerAmount = stuckOnObstacle ? 1.5 * dt : steerSpeed * dt * Math.max(speedPercent, 0.1);
+        if (keys.left)  playerX -= steerAmount;
+        if (keys.right) playerX += steerAmount;
+
+        playerX -= (playerSeg.curve * CENTRIFUGAL_FORCE * speedPercent * speedPercent * dt);
+
+        if (playerX < -1 || playerX > 1) {
+            if (speed > OFF_ROAD_LIMIT) speed += OFF_ROAD_DECEL * dt;
+        }
+
+        speed = clamp(speed, 0, MAX_SPEED);
+        position += speed * dt;
+
+        // 检测是否驶上坡道（Level 3飞跃触发）
+        if (currentLevel === 3 && playerSeg.isRamp && !playerAirborne) {
+            // 飞跃！
+            playerAirborne = true;
+            playerAirY = 0;
+            playerAirVY = JUMP_VELOCITY * (0.7 + speedPercent * 0.3);
+            // 随机翻滚方向（前翻、侧翻混合）
+            playerTumbleVX = (Math.random() > 0.5 ? 1 : -1) * (4 + Math.random() * 3);
+            playerTumbleZ = 0;
+            playerTumbleVZ = (Math.random() - 0.5) * 2.5;
+            playerTumbleX = 0;
+        }
     }
 
-    const steerSpeed = 3.0;
-    const steerAmount = stuckOnObstacle ? 1.5 * dt : steerSpeed * dt * Math.max(speedPercent, 0.1);
-    if (keys.left)  playerX -= steerAmount;
-    if (keys.right) playerX += steerAmount;
-
-    playerX -= (playerSeg.curve * CENTRIFUGAL_FORCE * speedPercent * speedPercent * dt);
-
-    if (playerX < -1 || playerX > 1) {
-        if (speed > OFF_ROAD_LIMIT) speed += OFF_ROAD_DECEL * dt;
-    }
-
-    speed = clamp(speed, 0, MAX_SPEED);
-    position += speed * dt;
     if (position >= trackLength) position = trackLength;
 }
 
@@ -859,7 +1093,8 @@ let truckDelay = 1.0;
 
 function updateTruck(dt) {
     gameTime += dt;
-    if (gameTime < 3.0) return;
+    const truckDelaySec = currentLevel === 3 ? 10.0 : 3.0;
+    if (gameTime < truckDelaySec) return;
 
     // 固定速度，不加速不减速
     truckSpeed = truckMaxSpeed;
@@ -890,6 +1125,9 @@ let crashIntensity = 0;
 let stuckOnObstacle = false;
 
 function checkCollisions() {
+    // 空中飞跃时不检测地面障碍碰撞
+    if (playerAirborne) return;
+
     const playerSegIdx = Math.floor(position / SEGMENT_LENGTH);
     const playerW = 0.18;
     let currentlyOverlapping = false;
@@ -953,7 +1191,7 @@ function updateHUD() {
     const pct = clamp(position / trackLength, 0, 1);
     elProgBar.style.width = (pct * 100) + '%';
     elProgPl.style.left = (pct * 100) + '%';
-    elProgLabel.textContent = currentLevel === 1 ? '第一关 终点' : '第二关 终点（一圈）';
+    elProgLabel.textContent = currentLevel === 1 ? '第一关 终点' : currentLevel === 2 ? '第二关 终点（一圈）' : '第三关 终点';
 
     const tPct = clamp(truckPosition / trackLength, 0, 1);
     elProgTr.style.left = (Math.max(0, tPct) * 100) + '%';
@@ -1073,14 +1311,35 @@ function drawRearMirror() {
     }
 }
 
-function showOverlay(title, sub, info, prompt) {
+const elLevelSelect = document.getElementById('level-select');
+
+function showOverlay(title, sub, info, prompt, showLevelPicker = false) {
     elOvTitle.textContent = title;
     elOvSub.textContent = sub;
     elOvInfo.textContent = info;
     elOvPrompt.textContent = prompt;
     elOverlay.classList.add('show');
+    if (showLevelPicker) {
+        elLevelSelect.classList.add('show');
+    } else {
+        elLevelSelect.classList.remove('show');
+    }
 }
-function hideOverlay() { elOverlay.classList.remove('show'); }
+function hideOverlay() {
+    elOverlay.classList.remove('show');
+    elLevelSelect.classList.remove('show');
+}
+
+// Level select buttons
+function jumpToLevel(level) {
+    startLevel(level);
+    gameState = STATE.COUNTDOWN;
+    hideOverlay();
+    elCdown.classList.add('show');
+}
+document.getElementById('btn-lv1').addEventListener('click', () => jumpToLevel(1));
+document.getElementById('btn-lv2').addEventListener('click', () => jumpToLevel(2));
+document.getElementById('btn-lv3').addEventListener('click', () => jumpToLevel(3));
 
 // ===== SECTION 9: GAME STATE MACHINE =====
 let gameState = STATE.MENU;
@@ -1104,12 +1363,24 @@ function startLevel(level) {
     keys.left = keys.right = keys.up = keys.down = false;
     truckMesh.visible = false;
 
+    // 重置飞跃/翻滚状态
+    playerAirborne = false;
+    playerAirY = 0;
+    playerAirVY = 0;
+    playerTumbleX = 0;
+    playerTumbleZ = 0;
+    playerTumbleVX = 0;
+    playerTumbleVZ = 0;
+
     if (level === 1) {
         buildTrack();
         truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO;
-    } else {
+    } else if (level === 2) {
         buildTrack2();
         truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO_L2;
+    } else {
+        buildTrack3();
+        truckMaxSpeed = MAX_SPEED * TRUCK_SPEED_RATIO_L3;
     }
     truckPosition = -TRUCK_INITIAL_DISTANCE * SEGMENT_LENGTH;
 
@@ -1132,6 +1403,12 @@ document.addEventListener('keydown', (e) => {
             e.preventDefault();
         } else if (gameState === STATE.LEVEL_CLEAR) {
             startLevel(2);
+            gameState = STATE.COUNTDOWN;
+            hideOverlay();
+            elCdown.classList.add('show');
+            e.preventDefault();
+        } else if (gameState === STATE.LEVEL2_CLEAR) {
+            startLevel(3);
             gameState = STATE.COUNTDOWN;
             hideOverlay();
             elCdown.classList.add('show');
@@ -1211,11 +1488,17 @@ function gameLoop(timestamp) {
                         `用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
                         '按 ENTER 进入第二关');
                     elOvTitle.style.color = '#FFCC00';
+                } else if (currentLevel === 2) {
+                    gameState = STATE.LEVEL2_CLEAR;
+                    showOverlay('第二关通关！', 'STAGE 2 CLEAR',
+                        `用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
+                        '按 ENTER 进入第三关');
+                    elOvTitle.style.color = '#FF8800';
                 } else {
                     gameState = STATE.WIN;
-                    showOverlay('成功逃离!', 'YOU WIN!',
-                        `通关用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
-                        '按 ENTER 再来一次');
+                    showOverlay('成功逃离！大运没追上你！', 'YOU WIN!  🎉',
+                        `全程通关！用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
+                        '按 ENTER 再来一次，或选择关卡：', true);
                     elOvTitle.style.color = '#00FF00';
                 }
             }
@@ -1234,6 +1517,7 @@ function gameLoop(timestamp) {
             break;
 
         case STATE.WIN:
+        case STATE.LEVEL2_CLEAR:
             updateScene3D();
             updateCamera();
             renderer.render(scene, camera);
@@ -1252,7 +1536,7 @@ function init() {
     buildSpriteMeshes();
 
     // Show menu
-    showOverlay('逃离大运', 'ESCAPE FROM DAYUN', '↑/W 加速  ↓/S 刹车  ←/A →/D 转向  C 切换后视镜', '按 ENTER 或 SPACE 开始');
+    showOverlay('逃离大运', 'ESCAPE FROM DAYUN', '↑/W 加速  ↓/S 刹车  ←/A →/D 转向  C 切换后视镜', '按 ENTER 开始第一关，或选择关卡：', true);
     elOvTitle.style.color = '#FF3333';
 
     // Setup gameover handler to show overlay
@@ -1273,12 +1557,12 @@ function init() {
             if (gameOverReason === 'offroad') {
                 showOverlay('冲出赛道了!', 'GAME OVER',
                     `行驶距离: ${dist}m  |  用时: ${gameTime.toFixed(1)}s`,
-                    '按 ENTER 重新开始');
+                    '按 ENTER 重新开始，或选择关卡：', true);
                 elOvTitle.style.color = '#FF6600';
             } else {
                 showOverlay('被大运撞了!', 'GAME OVER',
                     `行驶距离: ${dist}m  |  用时: ${gameTime.toFixed(1)}s`,
-                    '按 ENTER 重新开始');
+                    '按 ENTER 重新开始，或选择关卡：', true);
                 elOvTitle.style.color = '#FF0000';
             }
         }
@@ -1335,10 +1619,16 @@ function init() {
                             `用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
                             '按 ENTER 进入第二关');
                         elOvTitle.style.color = '#FFCC00';
+                    } else if (currentLevel === 2) {
+                        gameState = STATE.LEVEL2_CLEAR;
+                        showOverlay('第二关通关！', 'STAGE 2 CLEAR',
+                            `用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
+                            '按 ENTER 进入第三关');
+                        elOvTitle.style.color = '#FF8800';
                     } else {
                         gameState = STATE.WIN;
-                        showOverlay('成功逃离!', 'YOU WIN!',
-                            `通关用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
+                        showOverlay('成功逃离！大运没追上你！', 'YOU WIN!  🎉',
+                            `全程通关！用时: ${gameTime.toFixed(1)}s  |  平均速度: ~${kphAvg} km/h`,
                             '按 ENTER 再来一次');
                         elOvTitle.style.color = '#00FF00';
                     }
@@ -1354,6 +1644,7 @@ function init() {
             case STATE.GAMEOVER:
             case STATE.WIN:
             case STATE.LEVEL_CLEAR:
+            case STATE.LEVEL2_CLEAR:
                 updateScene3D();
                 updateCamera();
                 renderer.render(scene, camera);
